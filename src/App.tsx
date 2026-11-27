@@ -64,6 +64,7 @@ import { PauseModal, RulesModal, ThemeModal, VictoryModal } from './components/M
 import { OnlineLobbyScreen } from './components/OnlineLobbyScreen';
 import { SetupScreen } from './components/SetupScreen';
 import { UnoDock } from './components/UnoDock';
+import { VictoryCelebrationCanvas } from './components/VictoryCelebrationCanvas';
 import type { OnlineGameEvent, OnlineRoomSnapshot } from './multiplayer/protocol';
 import { type ConnectionStatus, MangoOnlineClient } from './multiplayer/wsClient';
 
@@ -127,10 +128,14 @@ function parseQueryConfig(base: GameConfig): {
   config: GameConfig;
   autostart: boolean;
   roomCode: string;
+  demoVictory: boolean;
 } {
-  if (typeof window === 'undefined') return { config: base, autostart: false, roomCode: '' };
+  if (typeof window === 'undefined') {
+    return { config: base, autostart: false, roomCode: '', demoVictory: false };
+  }
   const params = new URLSearchParams(window.location.search);
   const autostart = params.get('autostart') === '1';
+  const demoVictory = params.get('victory') === '1';
   const roomCode = (params.get('room') ?? '').trim().toUpperCase();
   let next = { ...base };
 
@@ -158,7 +163,7 @@ function parseQueryConfig(base: GameConfig): {
     next = { ...next, themeId: themeParam };
   }
 
-  return { config: next, autostart, roomCode };
+  return { config: next, autostart, roomCode, demoVictory };
 }
 
 function buildPlayersForCategory(
@@ -194,9 +199,41 @@ export default function App() {
   const [config, setConfig] = useState<GameConfig>(initialBoot.config);
   const [playCategory, setPlayCategory] = useState<'computer' | 'local'>('local');
   const [screen, setScreen] = useState<AppScreen>(initialBoot.autostart ? 'playing' : 'home');
-  const [gameState, setGameState] = useState<GameState>(() =>
-    createInitialGameState(initialBoot.config)
+  const [matchEnded, setMatchEnded] = useState<boolean>(initialBoot.demoVictory);
+  const [celebrationWinner, setCelebrationWinner] = useState<{ name: string; color: string } | null>(
+    () =>
+      initialBoot.demoVictory
+        ? {
+            name: initialBoot.config.players[0]?.name ?? 'Player 1',
+            color:
+              PLAYER_PALETTES[initialBoot.config.players[0]?.paletteIndex ?? 0]?.color ?? '#FACC15',
+          }
+        : null
   );
+  const [gameState, setGameState] = useState<GameState>(() => {
+    const initial = createInitialGameState(initialBoot.config);
+    if (!initialBoot.demoVictory) return initial;
+    return {
+      ...initial,
+      phase: 'finished',
+      finishedOrder: [0],
+      players: initial.players.map((p, idx) =>
+        idx === 0
+          ? {
+              ...p,
+              finishedRank: 1,
+              tokens: p.tokens.map((t) => ({ ...t, zone: 'finished', homeStep: 5 })),
+            }
+          : p
+      ),
+      lastEvent: {
+        id: 1,
+        message: `${initial.players[0]?.name ?? 'Player 1'} wins the match!`,
+        playerId: 0,
+        kind: 'finish',
+      },
+    };
+  });
   const gameStateRef = useRef<GameState>(gameState);
   gameStateRef.current = gameState;
   const [savedMatch, setSavedMatch] = useState<GameState | null>(() => loadSavedMatch());
@@ -254,6 +291,7 @@ export default function App() {
   const rollTimeoutRef = useRef<number | null>(null);
   const botTimeoutRef = useRef<number | null>(null);
   const autoMoveTimeoutRef = useRef<number | null>(null);
+  const victoryModalTimeoutRef = useRef<number | null>(null);
   const effectCounterRef = useRef(0);
 
   const activeThemeId =
@@ -265,7 +303,22 @@ export default function App() {
 
   useEffect(() => {
     document.body.dataset.state = screen;
-  }, [screen]);
+    document.body.dataset.matchEnded = matchEnded ? 'true' : 'false';
+  }, [screen, matchEnded]);
+
+  // If booted in ?autostart=1&victory=1 preview, open VictoryModal after the full-screen board celebration shines
+  useEffect(() => {
+    if (!initialBoot.demoVictory) return;
+    victoryModalTimeoutRef.current = window.setTimeout(() => {
+      setScreen('gameover');
+    }, 1500);
+    return () => {
+      if (victoryModalTimeoutRef.current !== null) {
+        window.clearTimeout(victoryModalTimeoutRef.current);
+        victoryModalTimeoutRef.current = null;
+      }
+    };
+  }, [initialBoot.demoVictory]);
 
   useEffect(() => {
     soundFx.setVolume(volume);
@@ -329,6 +382,10 @@ export default function App() {
     if (autoMoveTimeoutRef.current !== null) {
       window.clearTimeout(autoMoveTimeoutRef.current);
       autoMoveTimeoutRef.current = null;
+    }
+    if (victoryModalTimeoutRef.current !== null) {
+      window.clearTimeout(victoryModalTimeoutRef.current);
+      victoryModalTimeoutRef.current = null;
     }
     setRolling(false);
     setActiveAnimation(null);
@@ -795,11 +852,11 @@ export default function App() {
         }
 
         let finalNextState: GameState;
-        let matchEnded = false;
+        let moveMatchEnded = false;
 
         if (options.precomputedNextState) {
           finalNextState = options.precomputedNextState;
-          matchEnded = Boolean(options.precomputedMatchEnded);
+          moveMatchEnded = Boolean(options.precomputedMatchEnded);
           if (options.precomputedStarChaosLabel) {
             triggerBoardImpact('#A855F7');
             soundFx.playChaosZap();
@@ -815,7 +872,7 @@ export default function App() {
               : commitMove(gameStateRef.current, move);
 
           finalNextState = result.nextState;
-          matchEnded = result.matchEnded;
+          moveMatchEnded = result.matchEnded;
 
           // Crazy Mode extra funny chaos: landing on a Safe Star triggers Turbo +2, Swaparoo, or Bonus Roll!
           if (
@@ -838,7 +895,9 @@ export default function App() {
         }
 
         setGameState(finalNextState);
-        if (matchEnded) {
+        if (moveMatchEnded || finalNextState.phase === 'finished') {
+          setCelebrationWinner({ name: owner.name, color: ownerPalette.color });
+          setMatchEnded(true);
           triggerBoardImpact('#FACC15');
           spawnBoardEffect(
             { x: BOARD_CENTER, y: BOARD_CENTER },
@@ -848,11 +907,17 @@ export default function App() {
             {
               label: `${owner.name.toUpperCase()} WINS!`,
               sprinklers: ['🎆', '🎉', '🎊', '🏆', '✨', '🥳'],
-              durationMs: 2450,
+              durationMs: 2600,
             }
           );
           soundFx.playVictoryFanfare();
-          setScreen('gameover');
+          if (victoryModalTimeoutRef.current !== null) {
+            window.clearTimeout(victoryModalTimeoutRef.current);
+          }
+          victoryModalTimeoutRef.current = window.setTimeout(() => {
+            victoryModalTimeoutRef.current = null;
+            setScreen('gameover');
+          }, 1250);
           if (!isOnlineMatchRef.current) {
             try {
               localStorage.removeItem(STORAGE_KEY_MATCH);
@@ -1381,7 +1446,19 @@ export default function App() {
         }
         setGameState(event.nextState);
         if (event.nextState.phase !== 'finished') {
+          setMatchEnded(false);
+          setCelebrationWinner(null);
           setScreen((prev) => (prev === 'gameover' ? 'playing' : prev));
+        } else {
+          const winnerId = event.nextState.finishedOrder[0] ?? 0;
+          const winnerPlayer = event.nextState.players[winnerId];
+          const winnerPal = PLAYER_PALETTES[winnerPlayer?.paletteIndex ?? 0];
+          setCelebrationWinner({
+            name: winnerPlayer?.name ?? 'Champion',
+            color: winnerPal?.color ?? '#FACC15',
+          });
+          setMatchEnded(true);
+          setScreen('gameover');
         }
       }
     },
@@ -1407,8 +1484,12 @@ export default function App() {
         setMySeatIndex(seatIdx);
         if (room.status === 'playing' && syncedState) {
           setGameState(syncedState);
-          setScreen('playing');
+          const ended = syncedState.phase === 'finished';
+          setMatchEnded(ended);
+          setScreen(ended ? 'gameover' : 'playing');
         } else {
+          setMatchEnded(false);
+          setCelebrationWinner(null);
           setScreen('lobby');
         }
       },
@@ -1419,6 +1500,8 @@ export default function App() {
         clearPendingTimers();
         setOnlineRoom(room);
         setGameState(freshState);
+        setMatchEnded(false);
+        setCelebrationWinner(null);
         setDiceDisplayValue(3);
         setShowThemeModal(false);
         setShowRulesModal(false);
@@ -1560,6 +1643,8 @@ export default function App() {
 
   const handleLeaveToHome = useCallback(() => {
     clearPendingTimers();
+    setMatchEnded(false);
+    setCelebrationWinner(null);
     if (isOnlineMatchRef.current || onlineRoom) {
       onlineClientRef.current?.leaveRoom();
       setOnlineRoom(null);
@@ -1609,6 +1694,8 @@ export default function App() {
 
   const handleStartMatch = useCallback(() => {
     clearPendingTimers();
+    setMatchEnded(false);
+    setCelebrationWinner(null);
     const fresh = createInitialGameState(config);
     setGameState(fresh);
     setDiceDisplayValue(3);
@@ -1624,12 +1711,16 @@ export default function App() {
   const handleResumeSavedMatch = useCallback(() => {
     if (!savedMatch) return;
     clearPendingTimers();
+    setMatchEnded(false);
+    setCelebrationWinner(null);
     setGameState(savedMatch);
     setConfig(savedMatch.config);
     setScreen('playing');
   }, [clearPendingTimers, savedMatch]);
 
   const handleRestartMatch = useCallback(() => {
+    setMatchEnded(false);
+    setCelebrationWinner(null);
     if (isOnlineMatchRef.current) {
       onlineClientRef.current?.sendAction({ type: 'restart_match' });
       setScreen('playing');
@@ -1643,6 +1734,8 @@ export default function App() {
   }, [clearPendingTimers, gameState.config]);
 
   const handleContinueForRanks = useCallback(() => {
+    setMatchEnded(false);
+    setCelebrationWinner(null);
     if (isOnlineMatchRef.current) {
       onlineClientRef.current?.sendAction({ type: 'continue_ranks' });
       setScreen('playing');
@@ -2018,6 +2111,12 @@ export default function App() {
           onBackToTitle={handleLeaveToHome}
         />
       )}
+
+      {/* Full-Screen Multi-Emitter Confetti & Sparkle Celebration Triggered by matchEnded */}
+      <VictoryCelebrationCanvas
+        active={matchEnded}
+        winnerColor={celebrationWinner?.color}
+      />
     </div>
   );
 }

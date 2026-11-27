@@ -4,16 +4,6 @@ import { PLAYER_PALETTES, THEME_LIST } from '../game/themes';
 import type { BoardTheme, GameState, ThemeId } from '../game/types';
 import { TeardropPinBadge } from './GameHud';
 
-const CONFETTI_PIECES = Array.from({ length: 32 }, (_, i) => ({
-  id: i,
-  leftPct: (i * 3.15 + (i % 5) * 1.4) % 98,
-  delaySec: (i % 8) * 0.14,
-  durationSec: 2.3 + (i % 5) * 0.35,
-  color: PLAYER_PALETTES[i % PLAYER_PALETTES.length].color,
-  width: i % 2 === 0 ? 10 : 7,
-  height: i % 3 === 0 ? 14 : 9,
-}));
-
 interface PauseModalProps {
   theme: BoardTheme;
   volume: number;
@@ -389,39 +379,26 @@ export function VictoryModal({
   const winnerPalette = PLAYER_PALETTES[winner.paletteIndex];
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-hidden"
-      style={{ backgroundColor: 'rgba(6, 16, 38, 0.8)' }}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="victory-modal-title"
-    >
-      {/* Cascading Confetti Celebration */}
-      <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
-        {CONFETTI_PIECES.map((piece) => (
-          <span
-            key={piece.id}
-            className="absolute top-0 rounded-sm animate-confetti"
-            style={{
-              left: `${piece.leftPct}%`,
-              width: `${piece.width}px`,
-              height: `${piece.height}px`,
-              backgroundColor: piece.color,
-              animationDelay: `${piece.delaySec}s`,
-              animationDuration: `${piece.durationSec}s`,
-            }}
-          />
-        ))}
-      </div>
-
+    <>
       <div
-        className="relative z-10 w-full max-w-lg rounded-2xl p-6 space-y-5 shadow-2xl animate-spring-pop"
-        style={{
-          backgroundColor: theme.panelBg,
-          border: `3px solid ${theme.accent}`,
-          color: theme.textPrimary,
-        }}
+        className="fixed inset-0 z-40"
+        style={{ backgroundColor: 'rgba(6, 16, 38, 0.78)' }}
+        aria-hidden="true"
+      />
+      <div
+        className="fixed inset-0 z-[65] flex items-center justify-center p-4 overflow-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="victory-modal-title"
       >
+        <div
+          className="relative w-full max-w-lg rounded-2xl p-6 space-y-5 shadow-2xl animate-spring-pop"
+          style={{
+            backgroundColor: theme.panelBg,
+            border: `3px solid ${theme.accent}`,
+            color: theme.textPrimary,
+          }}
+        >
         <div className="flex items-center gap-3.5">
           <div
             className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 shadow-md"
@@ -527,7 +504,8 @@ export function VictoryModal({
             New Setup
           </button>
         </div>
+        </div>
       </div>
-    </div>
+    </>
   );
 }
