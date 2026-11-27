@@ -1,4 +1,4 @@
-import type { BoardTheme, PlayerPalette, ThemeId } from './types';
+import type { BoardTheme, PlayerPalette, ThemeId } from './types.ts';
 
 /**
  * 10 vibrant, high-contrast Ludo player palettes.

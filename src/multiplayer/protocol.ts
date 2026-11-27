@@ -5,7 +5,7 @@ import type {
   MoveOption,
   ThemeId,
   UnoCard,
-} from '../game/types';
+} from '../game/types.ts';
 
 export type PlayCategory = 'multiplayer' | 'computer' | 'local';
 

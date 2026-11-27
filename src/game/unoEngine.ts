@@ -1,10 +1,10 @@
-import { buildBoardGeometry, getTokenPoint } from './boardGeometry';
+import { buildBoardGeometry, getTokenPoint } from './boardGeometry.ts';
 import {
   commitMove,
   getLegalMovesForDirection,
   getNextActivePlayerIndex,
   isRingSquareSafe,
-} from './engine';
+} from './engine.ts';
 import type {
   GameState,
   MoveOption,
@@ -15,7 +15,7 @@ import type {
   UnoCardColor,
   UnoCardKind,
   UnoState,
-} from './types';
+} from './types.ts';
 
 export const UNO_HAND_SIZE = 6;
 

@@ -1,4 +1,4 @@
-import { buildBoardGeometry } from '../game/boardGeometry';
+import { buildBoardGeometry } from '../game/boardGeometry.ts';
 import {
   applyDiceRoll,
   chooseBestBotMove,
@@ -11,7 +11,7 @@ import {
   resolveCrazyStarChaos,
   rollSmartDie,
   YARD_MERCY_CHANCES,
-} from '../game/engine';
+} from '../game/engine.ts';
 import {
   acceptUnoKnockback,
   cancelUnoNumberCard,
@@ -23,7 +23,7 @@ import {
   getUnoKnockbackMoves,
   playUnoActionCard,
   selectUnoNumberCard,
-} from '../game/unoEngine';
+} from '../game/unoEngine.ts';
 import type {
   GameConfig,
   GameMode,
@@ -32,13 +32,13 @@ import type {
   PlayerConfig,
   ThemeId,
   UnoCard,
-} from '../game/types';
+} from '../game/types.ts';
 import type {
   GameActionPayload,
   OnlineGameEvent,
   OnlineRoomSnapshot,
   OnlineSeat,
-} from '../multiplayer/protocol';
+} from '../multiplayer/protocol.ts';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const ROOM_IDLE_TTL_MS = 30 * 60 * 1000;

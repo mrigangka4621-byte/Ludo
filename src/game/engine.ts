@@ -3,9 +3,9 @@ import {
   CLASSIC_ARM_PALETTE_INDICES,
   getPlayerArmAssignments,
   getTokenPoint,
-} from './boardGeometry';
-import { PLAYER_PALETTES } from './themes';
-import { createInitialUnoState } from './unoEngine';
+} from './boardGeometry.ts';
+import { PLAYER_PALETTES } from './themes.ts';
+import { createInitialUnoState } from './unoEngine.ts';
 import type {
   BoardGeometry,
   DiceDirectorState,
@@ -17,7 +17,7 @@ import type {
   PlayerConfig,
   PlayerState,
   TokenState,
-} from './types';
+} from './types.ts';
 
 export const YARD_MERCY_CHANCES = 10;
 export const COMEBACK_YARD_MERCY_CHANCES = 8;

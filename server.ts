@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +11,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
-const IS_PROD = process.env.NODE_ENV === 'production';
+const DIST_DIR = path.resolve(__dirname, 'dist');
+const IS_DEV_RUNNER =
+  process.env.npm_lifecycle_event === 'dev' ||
+  process.execArgv.some((arg) => arg.includes('tsx'));
+const IS_PROD =
+  process.env.NODE_ENV === 'production' ||
+  (!IS_DEV_RUNNER && fs.existsSync(path.join(DIST_DIR, 'index.html')));
 
 async function startServer() {
   const app = express();

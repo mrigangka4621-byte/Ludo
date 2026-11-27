@@ -5,7 +5,7 @@ import type {
   HomeStretchCell,
   HomeYardGeometry,
   Point2D,
-} from './types';
+} from './types.ts';
 
 export const BOARD_VIEWBOX_SIZE = 1000;
 export const BOARD_CENTER = 500;
