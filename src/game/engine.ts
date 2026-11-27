@@ -20,13 +20,26 @@ import type {
 } from './types.ts';
 
 export const YARD_MERCY_CHANCES = 10;
-export const COMEBACK_YARD_MERCY_CHANCES = 8;
+export const COMEBACK_YARD_MERCY_CHANCES = 5;
 /** Standard 6 chance is 1/6 (~16.67%); +50% comeback boost = 1.5 * (1/6) = 0.25 (25%) */
 export const COMEBACK_SIX_PROBABILITY = 0.25;
 export const CRAZY_YARD_MERCY_CHANCES = 4;
 export const CRAZY_MAX_CONSECUTIVE_SIXES = 2;
+export const CRAZY_TIMER_MIN_MINUTES = 10;
+export const CRAZY_TIMER_MAX_MINUTES = 30;
+export const CRAZY_TIMER_DEFAULT_MINUTES = 15;
 export const MAX_FIRE_STREAK_ROLLS = 6;
 export const UNO_BACKWARD_CAPTURE_PENALTY = 6;
+
+export function clampCrazyTimerMinutes(minutes?: number): number {
+  if (typeof minutes !== 'number' || !Number.isFinite(minutes)) {
+    return CRAZY_TIMER_DEFAULT_MINUTES;
+  }
+  return Math.max(
+    CRAZY_TIMER_MIN_MINUTES,
+    Math.min(CRAZY_TIMER_MAX_MINUTES, Math.round(minutes))
+  );
+}
 
 export function createInitialDiceDirector(): DiceDirectorState {
   return {
@@ -72,16 +85,19 @@ export function createDefaultConfig(): GameConfig {
     tokensPerPlayer: 4,
     themeId: 'arcade',
     players: createDefaultPlayers(4),
+    crazyTimerMinutes: CRAZY_TIMER_DEFAULT_MINUTES,
   };
 }
 
 export function createInitialGameState(
   config: GameConfig,
-  rng: () => number = Math.random
+  rng: () => number = Math.random,
+  now: number = Date.now()
 ): GameState {
   const armAssignments = getPlayerArmAssignments(config.playerCount);
   const geometry = buildBoardGeometry(config.playerCount);
   const isUno = config.mode === 'uno';
+  const crazyTimerMinutes = clampCrazyTimerMinutes(config.crazyTimerMinutes);
 
   const players: PlayerState[] = config.players.slice(0, config.playerCount).map((pCfg, idx) => {
     const armIndex = armAssignments[idx];
@@ -112,7 +128,11 @@ export function createInitialGameState(
   });
 
   return {
-    config: { ...config, players: config.players.slice(0, config.playerCount) },
+    config: {
+      ...config,
+      crazyTimerMinutes,
+      players: config.players.slice(0, config.playerCount),
+    },
     players,
     activePlayerIndex: 0,
     phase: isUno ? 'choosing_card' : 'awaiting_roll',
@@ -126,7 +146,7 @@ export function createInitialGameState(
       message: isUno
         ? `🃏 ${players[0].name}'s turn — play a UNO card from your 6-card hand!`
         : config.mode === 'crazy'
-          ? `⚡ CRAZY MODE! ${players[0].name} rolls first — watch out for snipes & chaos stars!`
+          ? `⚡ CRAZY MODE (${crazyTimerMinutes}m timer)! ${players[0].name} rolls first — highest progress wins if time runs out!`
           : `${players[0].name} rolls first.`,
       playerId: 0,
       kind: 'info',
@@ -138,6 +158,8 @@ export function createInitialGameState(
     diceDirector: createInitialDiceDirector(),
     turnDirection: 1,
     crazyRevengeCharges: {},
+    crazyTimerEndsAt: config.mode === 'crazy' ? now + crazyTimerMinutes * 60_000 : null,
+    endedByTimer: false,
     unoState: isUno ? createInitialUnoState(players.length, rng) : undefined,
   };
 }
@@ -1589,5 +1611,114 @@ export function resolveCrazyStarChaos(
     },
   };
 }
+
+export interface PlayerProgressSummary {
+  finishedCount: number;
+  totalProgressSteps: number;
+  maxProgressSteps: number;
+  progressPct: number;
+}
+
+/**
+ * Computes exact journey progress for a player across all their tokens.
+ * Yard = 0, Start Square = 1, Track = 1 + lapProgress, Home Stretch = ringLength + 1 + homeIndex, Finished = ringLength + homeLength + 1.
+ */
+export function computePlayerProgress(
+  state: GameState,
+  player: PlayerState
+): PlayerProgressSummary {
+  const geometry = buildBoardGeometry(state.config.playerCount);
+  const fullTokenSteps = geometry.ringLength + geometry.homeLength + 1;
+  let finishedCount = 0;
+  let totalProgressSteps = 0;
+
+  for (const tok of player.tokens) {
+    if (tok.zone === 'finished') {
+      finishedCount += 1;
+      totalProgressSteps += fullTokenSteps;
+    } else if (tok.zone === 'home_stretch') {
+      const homeStep = Math.max(0, Math.min(geometry.homeLength - 1, tok.homeIndex));
+      totalProgressSteps += geometry.ringLength + 1 + homeStep;
+    } else if (tok.zone === 'track') {
+      const trackStep = Math.max(0, Math.min(geometry.ringLength - 1, tok.lapProgress));
+      totalProgressSteps += 1 + trackStep;
+    }
+  }
+
+  const maxProgressSteps = Math.max(1, player.tokens.length * fullTokenSteps);
+  const progressPct = Math.min(100, Math.round((totalProgressSteps / maxProgressSteps) * 100));
+
+  return {
+    finishedCount,
+    totalProgressSteps,
+    maxProgressSteps,
+    progressPct,
+  };
+}
+
+/**
+ * Resolves Crazy Mode match timeout: ranks every player 1st, 2nd, 3rd, ...
+ * Preserves any players who already finished all tokens earlier, then ranks all
+ * remaining players by finished tokens, total board progress, captures, and seat order.
+ */
+export function resolveCrazyTimerExpiration(state: GameState): GameState {
+  if (state.phase === 'finished') return state;
+
+  const progressByPlayer = new Map<number, PlayerProgressSummary>();
+  for (const p of state.players) {
+    progressByPlayer.set(p.id, computePlayerProgress(state, p));
+  }
+
+  const ranked = [...state.players].sort((a, b) => {
+    if (a.finishedRank !== null && b.finishedRank !== null) {
+      return a.finishedRank - b.finishedRank;
+    }
+    if (a.finishedRank !== null) return -1;
+    if (b.finishedRank !== null) return 1;
+
+    const pa = progressByPlayer.get(a.id)!;
+    const pb = progressByPlayer.get(b.id)!;
+
+    if (pb.finishedCount !== pa.finishedCount) {
+      return pb.finishedCount - pa.finishedCount;
+    }
+    if (pb.totalProgressSteps !== pa.totalProgressSteps) {
+      return pb.totalProgressSteps - pa.totalProgressSteps;
+    }
+    if (b.captures !== a.captures) {
+      return b.captures - a.captures;
+    }
+    return a.id - b.id;
+  });
+
+  const rankById = new Map<number, number>();
+  ranked.forEach((p, idx) => {
+    rankById.set(p.id, idx + 1);
+  });
+
+  const winner = ranked[0];
+  const winnerProg = progressByPlayer.get(winner.id)!;
+
+  return {
+    ...state,
+    phase: 'finished',
+    diceValue: null,
+    consecutiveSixes: 0,
+    crazyTimerEndsAt: null,
+    endedByTimer: true,
+    finishedOrder: ranked.map((p) => p.id),
+    players: state.players.map((p) => ({
+      ...p,
+      finishedRank: rankById.get(p.id) ?? null,
+    })),
+    lastEvent: {
+      id: (state.lastEvent?.id ?? 0) + 1,
+      message: `⏱️ Time's up! ${winner.name} wins Crazy Mode with ${winnerProg.progressPct}% progress!`,
+      playerId: winner.id,
+      kind: 'finish',
+    },
+  };
+}
+
 
 

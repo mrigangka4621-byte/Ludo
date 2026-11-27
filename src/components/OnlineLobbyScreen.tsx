@@ -6,11 +6,20 @@ import {
   Copy,
   Crown,
   Link2,
+  Minus,
   Play,
+  Plus,
+  Timer,
   Users,
   WifiOff,
 } from 'lucide-react';
-import { createDefaultPlayers, createInitialGameState } from '../game/engine';
+import {
+  clampCrazyTimerMinutes,
+  CRAZY_TIMER_MAX_MINUTES,
+  CRAZY_TIMER_MIN_MINUTES,
+  createDefaultPlayers,
+  createInitialGameState,
+} from '../game/engine';
 import { soundFx } from '../game/sound';
 import { BOARD_THEMES, PLAYER_PALETTES } from '../game/themes';
 import type { GameMode, ThemeId } from '../game/types';
@@ -39,6 +48,7 @@ interface OnlineLobbyScreenProps {
     playerCount?: number;
     tokensPerPlayer?: 2 | 4;
     fillWithBots?: boolean;
+    crazyTimerMinutes?: number;
   }) => void;
   onStartMatch: () => void;
   onLeaveRoom: () => void;
@@ -410,6 +420,103 @@ export function OnlineLobbyScreen({
                 );
               })}
             </div>
+
+            {room.mode === 'crazy' && (
+              <div
+                data-testid="lobby-crazy-timer"
+                className="rounded-xl p-3 space-y-2"
+                style={{
+                  backgroundColor: 'rgba(249, 115, 22, 0.14)',
+                  border: '1.5px solid rgba(251, 146, 60, 0.55)',
+                }}
+              >
+                <div className="flex items-center justify-between gap-2 text-xs font-bold">
+                  <span className="inline-flex items-center gap-1.5 text-orange-200">
+                    <Timer size={14} className="text-orange-300" />
+                    <span>Crazy Mode Timer (10–30 min)</span>
+                  </span>
+                  {isHost ? (
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        aria-label="Decrease Crazy timer by 1 minute"
+                        data-testid="lobby-crazy-timer-dec"
+                        disabled={room.crazyTimerMinutes <= CRAZY_TIMER_MIN_MINUTES}
+                        onClick={() => {
+                          soundFx.playButtonClick();
+                          onUpdateSettings({
+                            crazyTimerMinutes: clampCrazyTimerMinutes(room.crazyTimerMinutes - 1),
+                          });
+                        }}
+                        className="w-6 h-6 rounded-md flex items-center justify-center bg-black/35 text-orange-200 border border-orange-300/40 disabled:opacity-35"
+                      >
+                        <Minus size={12} />
+                      </button>
+                      <span
+                        data-testid="lobby-crazy-timer-value"
+                        className="font-mono-num text-xs font-extrabold text-yellow-300 min-w-[46px] text-center"
+                      >
+                        {room.crazyTimerMinutes} min
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="Increase Crazy timer by 1 minute"
+                        data-testid="lobby-crazy-timer-inc"
+                        disabled={room.crazyTimerMinutes >= CRAZY_TIMER_MAX_MINUTES}
+                        onClick={() => {
+                          soundFx.playButtonClick();
+                          onUpdateSettings({
+                            crazyTimerMinutes: clampCrazyTimerMinutes(room.crazyTimerMinutes + 1),
+                          });
+                        }}
+                        className="w-6 h-6 rounded-md flex items-center justify-center bg-black/35 text-orange-200 border border-orange-300/40 disabled:opacity-35"
+                      >
+                        <Plus size={12} />
+                      </button>
+                    </div>
+                  ) : (
+                    <span
+                      data-testid="lobby-crazy-timer-value"
+                      className="font-mono-num text-xs font-extrabold text-yellow-300"
+                    >
+                      {room.crazyTimerMinutes} min
+                    </span>
+                  )}
+                </div>
+
+                {isHost && (
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {[10, 15, 20, 25, 30].map((mins) => {
+                      const active = room.crazyTimerMinutes === mins;
+                      return (
+                        <button
+                          key={mins}
+                          type="button"
+                          data-testid={`lobby-crazy-timer-${mins}`}
+                          aria-pressed={active}
+                          onClick={() => {
+                            soundFx.playButtonClick();
+                            onUpdateSettings({ crazyTimerMinutes: mins });
+                          }}
+                          className="py-1 rounded-lg font-mono-num text-[11px] font-extrabold transition-transform active:scale-95"
+                          style={{
+                            backgroundColor: active ? '#F97316' : theme.panelMutedBg,
+                            color: active ? '#FFFFFF' : '#FED7AA',
+                            border: `1px solid ${active ? '#FEF08A' : 'rgba(251, 146, 60, 0.35)'}`,
+                          }}
+                        >
+                          {mins}m
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <p className="text-[11px]" style={{ color: theme.textSecondary }}>
+                  When the timer ends, 1st, 2nd, 3rd... are ranked automatically by board progress.
+                </p>
+              </div>
+            )}
 
             {isHost && (
               <div className="space-y-2.5 pt-1">

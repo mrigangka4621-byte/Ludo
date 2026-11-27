@@ -1,5 +1,11 @@
 import { useState, type ReactNode } from 'react';
-import { ArrowLeft, Crown, KeyRound, Play } from 'lucide-react';
+import { ArrowLeft, Crown, KeyRound, Minus, Play, Plus, RotateCcw, Timer } from 'lucide-react';
+import {
+  clampCrazyTimerMinutes,
+  CRAZY_TIMER_DEFAULT_MINUTES,
+  CRAZY_TIMER_MAX_MINUTES,
+  CRAZY_TIMER_MIN_MINUTES,
+} from '../game/engine';
 import { soundFx } from '../game/sound';
 import { BOARD_THEMES, THEME_LIST } from '../game/themes';
 import type { GameConfig, GameMode, ThemeId } from '../game/types';
@@ -33,9 +39,12 @@ export interface HomeScreenProps {
     playerCount: number;
     tokensPerPlayer: 2 | 4;
     fillWithBots: boolean;
+    crazyTimerMinutes: number;
   }) => void;
   onJoinOnlineRoom: (roomCode: string, playerName: string) => void;
   onResumeMatch: () => void;
+  recentOnlineRoom?: { roomCode: string; playerName: string } | null;
+  onRejoinRecentRoom?: () => void;
 }
 
 type LandingStep = 'home' | 'modes' | 'mp-room';
@@ -171,6 +180,8 @@ export function HomeScreen({
   onCreateOnlineRoom,
   onJoinOnlineRoom,
   onResumeMatch,
+  recentOnlineRoom = null,
+  onRejoinRecentRoom,
 }: HomeScreenProps) {
   const [step, setStep] = useState<LandingStep>(() => {
     if (initialRoomCode) return 'mp-room';
@@ -187,7 +198,10 @@ export function HomeScreen({
   );
   const [mpTokens, setMpTokens] = useState<2 | 4>(config.tokensPerPlayer);
   const [mpFillBots, setMpFillBots] = useState<boolean>(true);
-  const [playerName, setPlayerName] = useState<string>('Player 1');
+  const [mpCrazyTimerMinutes, setMpCrazyTimerMinutes] = useState<number>(
+    clampCrazyTimerMinutes(config.crazyTimerMinutes ?? CRAZY_TIMER_DEFAULT_MINUTES)
+  );
+  const [playerName, setPlayerName] = useState<string>('');
   const [roomCodeInput, setRoomCodeInput] = useState<string>(initialRoomCode.toUpperCase());
 
   const theme = BOARD_THEMES[config.themeId];
@@ -319,26 +333,56 @@ export function HomeScreen({
               />
             </div>
 
-            {/* Optional Resume Saved Match + Compact Theme Selector */}
+            {/* Optional Rejoin Live Room + Resume Saved Match + Compact Theme Selector */}
             <div className="w-full flex flex-col items-center gap-2.5 pt-1">
-              {hasSavedMatch && (
-                <button
-                  type="button"
-                  data-testid="home-resume-btn"
-                  onClick={() => {
-                    soundFx.playButtonClick();
-                    onResumeMatch();
-                  }}
-                  className="inline-flex items-center justify-center gap-2 px-5 py-2 rounded-full text-xs sm:text-sm font-extrabold shadow-lg transition-transform hover:scale-[1.03] active:scale-95"
-                  style={{
-                    backgroundColor: 'rgba(9, 32, 86, 0.82)',
-                    color: '#FDE047',
-                    border: '2px solid #FACC15',
-                  }}
-                >
-                  <Play size={14} fill="currentColor" />
-                  <span>Resume Saved Match</span>
-                </button>
+              {(recentOnlineRoom || hasSavedMatch) && (
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  {recentOnlineRoom && onRejoinRecentRoom && (
+                    <button
+                      type="button"
+                      disabled={connectingOnline}
+                      data-testid="home-rejoin-room-btn"
+                      onClick={() => {
+                        soundFx.playDeploy();
+                        onRejoinRecentRoom();
+                      }}
+                      className="inline-flex items-center justify-center gap-2 px-5 py-2 rounded-full text-xs sm:text-sm font-extrabold shadow-lg transition-transform hover:scale-[1.03] active:scale-95 disabled:opacity-60"
+                      style={{
+                        background:
+                          'linear-gradient(180deg, #10B981 0%, #059669 100%)',
+                        color: '#FFFFFF',
+                        border: '2px solid #A7F3D0',
+                      }}
+                    >
+                      <RotateCcw size={14} />
+                      <span>
+                        {connectingOnline
+                          ? 'Rejoining...'
+                          : `Rejoin Live Room · ${recentOnlineRoom.roomCode}`}
+                      </span>
+                    </button>
+                  )}
+
+                  {hasSavedMatch && (
+                    <button
+                      type="button"
+                      data-testid="home-resume-btn"
+                      onClick={() => {
+                        soundFx.playButtonClick();
+                        onResumeMatch();
+                      }}
+                      className="inline-flex items-center justify-center gap-2 px-5 py-2 rounded-full text-xs sm:text-sm font-extrabold shadow-lg transition-transform hover:scale-[1.03] active:scale-95"
+                      style={{
+                        backgroundColor: 'rgba(9, 32, 86, 0.82)',
+                        color: '#FDE047',
+                        border: '2px solid #FACC15',
+                      }}
+                    >
+                      <Play size={14} fill="currentColor" />
+                      <span>Resume Saved Match</span>
+                    </button>
+                  )}
+                </div>
               )}
 
               <div className="flex items-center justify-center gap-2.5">
@@ -511,7 +555,7 @@ export function HomeScreen({
                   maxLength={18}
                   value={playerName}
                   onChange={(e) => setPlayerName(e.target.value)}
-                  placeholder="Enter your name"
+                  placeholder={mpTab === 'create' ? 'Player 1 (Host)' : 'Auto (Player 2, 3...)'}
                   data-testid="mp-player-name-input"
                   className="w-full h-11 px-3.5 rounded-xl text-sm font-bold text-white placeholder:text-blue-200/50 outline-none focus-visible:ring-2 focus-visible:ring-yellow-300"
                   style={{
@@ -644,6 +688,87 @@ export function HomeScreen({
                     </label>
                   </div>
 
+                  {/* Crazy Mode Adjustable Match Timer (10–30 min) */}
+                  {mpMode === 'crazy' && (
+                    <div
+                      data-testid="mp-crazy-timer-control"
+                      className="rounded-xl p-3 space-y-2"
+                      style={{
+                        backgroundColor: 'rgba(249, 115, 22, 0.16)',
+                        border: '1.5px solid rgba(251, 146, 60, 0.65)',
+                      }}
+                    >
+                      <div className="flex items-center justify-between gap-2 text-xs font-bold">
+                        <span className="inline-flex items-center gap-1.5 text-orange-200">
+                          <Timer size={14} className="text-orange-300" />
+                          <span>Match Timer (10–30 min)</span>
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            aria-label="Decrease Crazy Mode timer by 1 minute"
+                            data-testid="mp-crazy-timer-dec"
+                            disabled={mpCrazyTimerMinutes <= CRAZY_TIMER_MIN_MINUTES}
+                            onClick={() => {
+                              soundFx.playButtonClick();
+                              setMpCrazyTimerMinutes((m) => clampCrazyTimerMinutes(m - 1));
+                            }}
+                            className="w-6 h-6 rounded-md flex items-center justify-center bg-black/35 text-orange-200 border border-orange-300/40 disabled:opacity-35"
+                          >
+                            <Minus size={12} />
+                          </button>
+                          <span
+                            data-testid="mp-crazy-timer-value"
+                            className="font-mono-num text-xs font-extrabold text-yellow-300 min-w-[46px] text-center"
+                          >
+                            {mpCrazyTimerMinutes} min
+                          </span>
+                          <button
+                            type="button"
+                            aria-label="Increase Crazy Mode timer by 1 minute"
+                            data-testid="mp-crazy-timer-inc"
+                            disabled={mpCrazyTimerMinutes >= CRAZY_TIMER_MAX_MINUTES}
+                            onClick={() => {
+                              soundFx.playButtonClick();
+                              setMpCrazyTimerMinutes((m) => clampCrazyTimerMinutes(m + 1));
+                            }}
+                            className="w-6 h-6 rounded-md flex items-center justify-center bg-black/35 text-orange-200 border border-orange-300/40 disabled:opacity-35"
+                          >
+                            <Plus size={12} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-5 gap-1">
+                        {[10, 15, 20, 25, 30].map((mins) => {
+                          const active = mpCrazyTimerMinutes === mins;
+                          return (
+                            <button
+                              key={mins}
+                              type="button"
+                              data-testid={`mp-crazy-timer-${mins}`}
+                              aria-pressed={active}
+                              onClick={() => {
+                                soundFx.playButtonClick();
+                                setMpCrazyTimerMinutes(mins);
+                              }}
+                              className="py-1 rounded-lg font-mono-num text-[11px] font-extrabold transition-transform active:scale-95"
+                              style={{
+                                backgroundColor: active ? '#F97316' : 'rgba(6, 20, 56, 0.65)',
+                                color: active ? '#FFFFFF' : '#FED7AA',
+                                border: `1px solid ${active ? '#FEF08A' : 'rgba(251, 146, 60, 0.35)'}`,
+                              }}
+                            >
+                              {mins}m
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[10px] font-semibold text-orange-100/85">
+                        If time runs out, 1st, 2nd, 3rd... are ranked by board progress.
+                      </p>
+                    </div>
+                  )}
+
                   <button
                     type="button"
                     disabled={connectingOnline}
@@ -656,6 +781,7 @@ export function HomeScreen({
                         playerCount: mpPlayerCount,
                         tokensPerPlayer: mpTokens,
                         fillWithBots: mpFillBots,
+                        crazyTimerMinutes: mpCrazyTimerMinutes,
                       });
                     }}
                     className="w-full py-3.5 px-5 rounded-2xl font-display font-black text-base sm:text-lg flex items-center justify-center gap-2 shadow-xl transition-transform hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60"
@@ -694,6 +820,9 @@ export function HomeScreen({
                         border: '2px solid rgba(250, 204, 21, 0.65)',
                       }}
                     />
+                    <p className="text-[11px] font-semibold text-blue-100/80 text-center">
+                      Works for lobbies &amp; live matches — rejoin or take over an open seat with the same code.
+                    </p>
                   </div>
 
                   <button
@@ -702,7 +831,7 @@ export function HomeScreen({
                     data-testid="mp-join-room-btn"
                     onClick={() => {
                       soundFx.playDeploy();
-                      onJoinOnlineRoom(roomCodeInput.trim(), playerName.trim() || 'Player');
+                      onJoinOnlineRoom(roomCodeInput.trim(), playerName.trim());
                     }}
                     className="w-full py-3.5 px-5 rounded-2xl font-display font-black text-base sm:text-lg flex items-center justify-center gap-2 shadow-xl transition-transform hover:scale-[1.01] active:scale-[0.98] disabled:opacity-50"
                     style={{

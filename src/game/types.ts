@@ -161,6 +161,8 @@ export interface GameConfig {
   tokensPerPlayer: 2 | 4;
   themeId: ThemeId;
   players: PlayerConfig[];
+  /** Crazy Mode match timer duration in minutes (10..30, default 15) */
+  crazyTimerMinutes?: number;
 }
 
 export interface TurnEventLog {
@@ -173,7 +175,7 @@ export interface TurnEventLog {
 export interface DiceDirectorState {
   /** Per-player consecutive rolls taken while all remaining pieces are stuck in Home Yard */
   yardStuckRolls: Record<number, number>;
-  /** Tracks whether each player has previously left Home Yard at least once (enables 8-roll +50% Comeback Mercy 6 if captured back to empty board) */
+  /** Tracks whether each player has previously left Home Yard at least once (enables 5-roll +50% Comeback Mercy 6 if captured back to empty board) */
   hasDeployedBefore?: Record<number, boolean>;
   /** Currently On-Fire playerId (at most one player at a time, or null in normal random mode) */
   firePlayerId: number | null;
@@ -234,6 +236,10 @@ export interface GameState {
   turnDirection?: 1 | -1;
   /** Crazy Mode: players who just got captured earn a guaranteed Revenge 6 on their next roll */
   crazyRevengeCharges?: Record<number, boolean>;
+  /** Crazy Mode: epoch ms when the 10-30 min match timer expires (null/undefined for non-Crazy modes) */
+  crazyTimerEndsAt?: number | null;
+  /** True when the match ended via Crazy Mode timer expiration (ranked by progress) */
+  endedByTimer?: boolean;
   /** UNO Ludo Mode: 6-card hands, discard pile, and active -2/-4 knockback stack */
   unoState?: UnoState;
 }

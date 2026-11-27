@@ -66,9 +66,9 @@ export function TitleEmblem({ theme, compact = false, subtitle }: TitleEmblemPro
 
   if (compact) {
     return (
-      <div className="relative inline-flex items-center select-none">
+      <div className="relative inline-flex items-center select-none shrink-0">
         <div
-          className="relative px-3.5 py-1.5 rounded-lg -rotate-1 shadow-md flex items-center gap-1.5"
+          className="relative px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-lg -rotate-1 shadow-md flex items-center gap-1 sm:gap-1.5"
           style={{
             background: `linear-gradient(180deg, ${ribbonFill} 0%, ${ribbonEdge} 100%)`,
             borderTop: `3px solid ${trimColor}`,
@@ -77,9 +77,9 @@ export function TitleEmblem({ theme, compact = false, subtitle }: TitleEmblemPro
             borderRight: `2px solid ${trimColor}`,
           }}
         >
-          <MangoIcon size={20} />
+          <MangoIcon size={18} />
           <span
-            className={`font-display font-bold text-lg sm:text-xl tracking-wide leading-none block whitespace-nowrap ${
+            className={`font-display font-bold text-[15px] sm:text-xl tracking-wide leading-none block whitespace-nowrap ${
               isArcade ? 'arcade-gold-text-sm' : ''
             }`}
             style={isArcade ? undefined : { color: theme.accent }}

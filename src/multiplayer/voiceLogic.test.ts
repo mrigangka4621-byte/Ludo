@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  base64ToBytes,
+  bytesToBase64,
+  computeFloatRmsLevel,
   computeRmsLevel,
+  decodeMuLawToFloat32,
+  downsampleAndEncodeMuLaw,
   evaluateSpeakingState,
   getActiveVoicePeerIds,
   shouldInitiateWebRtcOffer,
@@ -73,4 +78,27 @@ test('getActiveVoicePeerIds returns only connected remote peers who joined voice
     { seatIndex: 3, clientId: 'p4', name: 'Cara', connected: false, isHost: false, paletteIndex: 3, voiceJoined: true },
   ];
   assert.deepEqual(getActiveVoicePeerIds(seats, 'me'), ['p2']);
+});
+
+test('mu-law downsample + encode + base64 + decode preserves speech sine wave cleanly', () => {
+  const inRate = 48000;
+  const targetRate = 12000;
+  const samples = new Float32Array(4800); // 100ms at 48kHz
+  for (let i = 0; i < samples.length; i++) {
+    samples[i] = Math.sin((2 * Math.PI * 440 * i) / inRate) * 0.5;
+  }
+
+  const encoded = downsampleAndEncodeMuLaw(samples, inRate, targetRate);
+  assert.equal(encoded.length, 1200);
+
+  const b64 = bytesToBase64(encoded);
+  const restoredBytes = base64ToBytes(b64);
+  assert.deepEqual(restoredBytes, encoded);
+
+  const decoded = decodeMuLawToFloat32(restoredBytes);
+  assert.equal(decoded.length, 1200);
+
+  const rmsIn = computeFloatRmsLevel(samples);
+  const rmsOut = computeFloatRmsLevel(decoded);
+  assert.ok(Math.abs(rmsIn - rmsOut) < 0.04, `Expected RMS near ${rmsIn}, got ${rmsOut}`);
 });

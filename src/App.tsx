@@ -8,6 +8,7 @@ import {
 import {
   applyDiceRoll,
   chooseBestBotMove,
+  clampCrazyTimerMinutes,
   COMEBACK_YARD_MERCY_CHANCES,
   commitMove,
   createDefaultConfig,
@@ -17,6 +18,7 @@ import {
   getAutoMoveIfForced,
   getNextActivePlayerIndex,
   resolveCrazyStarChaos,
+  resolveCrazyTimerExpiration,
   rollSmartDie,
   YARD_MERCY_CHANCES,
 } from './game/engine';
@@ -65,6 +67,7 @@ import { OnlineLobbyScreen } from './components/OnlineLobbyScreen';
 import { SetupScreen } from './components/SetupScreen';
 import { UnoDock } from './components/UnoDock';
 import { VictoryCelebrationCanvas } from './components/VictoryCelebrationCanvas';
+import { InMatchVoiceStrip } from './components/VoiceIndicators';
 import type { OnlineGameEvent, OnlineRoomSnapshot } from './multiplayer/protocol';
 import { RoomVoiceManager, type VoiceUiSnapshot } from './multiplayer/voiceChat';
 import { type ConnectionStatus, MangoOnlineClient } from './multiplayer/wsClient';
@@ -72,6 +75,109 @@ import { type ConnectionStatus, MangoOnlineClient } from './multiplayer/wsClient
 const STORAGE_KEY_MATCH = 'decaludo_saved_match_v2';
 const STORAGE_KEY_THEME = 'decaludo_theme_v2';
 const STORAGE_KEY_VOLUME = 'decaludo_sfx_volume_v1';
+const STORAGE_KEY_ONLINE_SESSION = 'mango_ludo_active_room_v1';
+const STORAGE_KEY_RECENT_ONLINE_ROOM = 'mango_ludo_recent_room_v1';
+const RECENT_ONLINE_ROOM_TTL_MS = 30 * 60 * 1000;
+
+interface SavedOnlineSession {
+  roomCode: string;
+  playerName: string;
+  savedAt?: number;
+}
+
+function loadSavedOnlineSession(): SavedOnlineSession | null {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY_ONLINE_SESSION);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedOnlineSession>;
+    if (
+      parsed &&
+      typeof parsed.roomCode === 'string' &&
+      parsed.roomCode.trim().length >= 4 &&
+      typeof parsed.playerName === 'string'
+    ) {
+      return {
+        roomCode: parsed.roomCode.trim().toUpperCase(),
+        playerName: parsed.playerName.trim() || 'Player',
+      };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function saveOnlineSession(roomCode: string, playerName: string) {
+  try {
+    sessionStorage.setItem(
+      STORAGE_KEY_ONLINE_SESSION,
+      JSON.stringify({
+        roomCode: roomCode.trim().toUpperCase(),
+        playerName: playerName.trim() || 'Player',
+      })
+    );
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function clearSavedOnlineSession() {
+  try {
+    sessionStorage.removeItem(STORAGE_KEY_ONLINE_SESSION);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadRecentOnlineRoom(): SavedOnlineSession | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_RECENT_ONLINE_ROOM);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedOnlineSession>;
+    if (
+      parsed &&
+      typeof parsed.roomCode === 'string' &&
+      parsed.roomCode.trim().length >= 4 &&
+      typeof parsed.playerName === 'string'
+    ) {
+      const savedAt = typeof parsed.savedAt === 'number' ? parsed.savedAt : Date.now();
+      if (Date.now() - savedAt > RECENT_ONLINE_ROOM_TTL_MS) {
+        localStorage.removeItem(STORAGE_KEY_RECENT_ONLINE_ROOM);
+        return null;
+      }
+      return {
+        roomCode: parsed.roomCode.trim().toUpperCase(),
+        playerName: parsed.playerName.trim() || 'Player',
+        savedAt,
+      };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function saveRecentOnlineRoom(roomCode: string, playerName: string): SavedOnlineSession {
+  const entry: SavedOnlineSession = {
+    roomCode: roomCode.trim().toUpperCase(),
+    playerName: playerName.trim() || 'Player',
+    savedAt: Date.now(),
+  };
+  try {
+    localStorage.setItem(STORAGE_KEY_RECENT_ONLINE_ROOM, JSON.stringify(entry));
+  } catch {
+    // ignore storage errors
+  }
+  return entry;
+}
+
+function clearRecentOnlineRoom() {
+  try {
+    localStorage.removeItem(STORAGE_KEY_RECENT_ONLINE_ROOM);
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function loadSavedVolume(): { volume: number; muted: boolean } {
   try {
@@ -247,6 +353,10 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [onlineError, setOnlineError] = useState<string | null>(null);
   const [connectingOnline, setConnectingOnline] = useState(false);
+  const [recentOnlineRoom, setRecentOnlineRoom] = useState<SavedOnlineSession | null>(() =>
+    loadRecentOnlineRoom()
+  );
+  const onlineBackGuardPushedRef = useRef(false);
   const [voiceUi, setVoiceUi] = useState<VoiceUiSnapshot>({
     joined: false,
     joining: false,
@@ -255,6 +365,7 @@ export default function App() {
     localSpeaking: false,
     error: null,
     activePeerCount: 0,
+    transportMode: 'idle',
   });
   const [remoteSpeakingLocal, setRemoteSpeakingLocal] = useState<Record<string, boolean>>({});
 
@@ -290,6 +401,8 @@ export default function App() {
   const [showRulesModal, setShowRulesModal] = useState(false);
   const [showMobileRoster, setShowMobileRoster] = useState(false);
   const [directionToast, setDirectionToast] = useState<MoveDirection | null>(null);
+  const [crazyTimerRemainingMs, setCrazyTimerRemainingMs] = useState<number | null>(null);
+  const pausedCrazyRemainingRef = useRef<number | null>(null);
 
   const [activeAnimation, setActiveAnimation] = useState<ActiveTokenAnimation | null>(null);
   const [flyingCaptures, setFlyingCaptures] = useState<FlyingCaptureAnimation[]>([]);
@@ -1391,6 +1504,15 @@ export default function App() {
       }
 
       if (event.kind === 'move_committed') {
+        if (rollIntervalRef.current !== null) {
+          window.clearInterval(rollIntervalRef.current);
+          rollIntervalRef.current = null;
+        }
+        if (rollTimeoutRef.current !== null) {
+          window.clearTimeout(rollTimeoutRef.current);
+          rollTimeoutRef.current = null;
+        }
+        setRolling(false);
         playMoveVisualSequence(event.prevState, event.move, {
           isUnoKnockback: event.isUnoKnockback,
           playedCard: event.playedCard,
@@ -1402,6 +1524,15 @@ export default function App() {
       }
 
       if (event.kind === 'uno_action_played') {
+        if (rollIntervalRef.current !== null) {
+          window.clearInterval(rollIntervalRef.current);
+          rollIntervalRef.current = null;
+        }
+        if (rollTimeoutRef.current !== null) {
+          window.clearTimeout(rollTimeoutRef.current);
+          rollTimeoutRef.current = null;
+        }
+        setRolling(false);
         const geom = buildBoardGeometry(event.prevState.config.playerCount);
         const actor = event.prevState.players[event.actorSeatIndex];
         const actorYard = actor ? geom.yards[actor.armIndex].center : { x: BOARD_CENTER, y: BOARD_CENTER };
@@ -1450,6 +1581,15 @@ export default function App() {
       }
 
       if (event.kind === 'state_sync') {
+        if (rollIntervalRef.current !== null) {
+          window.clearInterval(rollIntervalRef.current);
+          rollIntervalRef.current = null;
+        }
+        if (rollTimeoutRef.current !== null) {
+          window.clearTimeout(rollTimeoutRef.current);
+          rollTimeoutRef.current = null;
+        }
+        setRolling(false);
         if (event.sound === 'card_snap') soundFx.playCardSnap();
         else if (event.sound === 'skip') soundFx.playUnoSkip();
         else if (event.sound === 'direction_fwd' || event.sound === 'direction_bwd') {
@@ -1494,6 +1634,9 @@ export default function App() {
       sendVoiceSignal: (targetClientId, signal) => {
         client.sendVoiceSignal(targetClientId, signal);
       },
+      sendVoiceAudio: (targetClientIds, sampleRate, data) => {
+        client.sendVoiceAudio(targetClientIds, sampleRate, data);
+      },
       onSnapshot: (snap) => {
         setVoiceUi(snap);
       },
@@ -1514,7 +1657,17 @@ export default function App() {
         setOnlineError(null);
         setOnlineRoom(room);
         setMySeatIndex(seatIdx);
-        voiceMgr.syncPeers(room.seats);
+        const mySeat = room.seats.find((s) => s.seatIndex === seatIdx);
+        const resolvedName = mySeat?.name ?? 'Player';
+        saveOnlineSession(room.roomCode, resolvedName);
+        setRecentOnlineRoom(saveRecentOnlineRoom(room.roomCode, resolvedName));
+
+        if (voiceMgr.isJoined()) {
+          voiceMgr.reannounceState(room.seats);
+        } else {
+          voiceMgr.syncPeers(room.seats);
+        }
+
         if (room.status === 'playing' && syncedState) {
           setGameState(syncedState);
           const ended = syncedState.phase === 'finished';
@@ -1534,7 +1687,11 @@ export default function App() {
         clearPendingTimers();
         setOnlineRoom(room);
         voiceMgr.clearError();
-        voiceMgr.syncPeers(room.seats);
+        if (voiceMgr.isJoined()) {
+          voiceMgr.reannounceState(room.seats);
+        } else {
+          voiceMgr.syncPeers(room.seats);
+        }
         setGameState(freshState);
         setMatchEnded(false);
         setCelebrationWinner(null);
@@ -1550,6 +1707,9 @@ export default function App() {
       onVoiceSignal: ({ fromClientId, signal }) => {
         void voiceMgr.handleSignal(fromClientId, signal);
       },
+      onVoiceAudio: ({ fromClientId, sampleRate, data }) => {
+        voiceMgr.handleVoiceAudio(fromClientId, sampleRate, data);
+      },
       onVoiceSpeaking: ({ clientId, speaking }) => {
         setOnlineRoom((prev) => {
           if (!prev) return prev;
@@ -1561,19 +1721,35 @@ export default function App() {
           };
         });
       },
-      onError: ({ message }) => {
+      onError: ({ code, message }) => {
         setConnectingOnline(false);
+        if (code === 'ROOM_NOT_FOUND' || code === 'MATCH_IN_PROGRESS' || code === 'ROOM_FULL') {
+          clearSavedOnlineSession();
+        }
+        if (code === 'ROOM_NOT_FOUND') {
+          clearRecentOnlineRoom();
+          setRecentOnlineRoom(null);
+        }
         setOnlineError(message);
       },
     });
 
+    // Auto-rejoin an active online room after accidental tab refresh or mobile mic-permission reload
+    if (!initialBoot.autostart && !initialBoot.demoVictory && !initialBoot.roomCode) {
+      const savedSession = loadSavedOnlineSession();
+      if (savedSession) {
+        setConnectingOnline(true);
+        client.joinRoom(savedSession.roomCode, savedSession.playerName);
+      }
+    }
+
     return () => {
       voiceMgr.leaveVoice(false);
       voiceManagerRef.current = null;
-      client.leaveRoom();
+      // Do NOT send room:leave on unmount/refresh so the player can seamlessly rejoin
       client.disconnect();
     };
-  }, [clearPendingTimers]);
+  }, [clearPendingTimers, initialBoot.autostart, initialBoot.demoVictory, initialBoot.roomCode]);
 
   // Optional CPU seat auto-play for offline Local & Computer matches (in Online rooms, server drives CPU seats)
   useEffect(() => {
@@ -1716,6 +1892,7 @@ export default function App() {
 
   const handleLeaveToHome = useCallback(() => {
     clearPendingTimers();
+    clearSavedOnlineSession();
     setMatchEnded(false);
     setCelebrationWinner(null);
     voiceManagerRef.current?.leaveVoice(true);
@@ -1750,6 +1927,7 @@ export default function App() {
       playerCount: number;
       tokensPerPlayer: 2 | 4;
       fillWithBots: boolean;
+      crazyTimerMinutes: number;
     }) => {
       setOnlineError(null);
       setConnectingOnline(true);
@@ -1766,6 +1944,129 @@ export default function App() {
     setConnectingOnline(true);
     onlineClientRef.current?.joinRoom(roomCode, playerName);
   }, []);
+
+  const handleRejoinRecentRoom = useCallback(() => {
+    if (!recentOnlineRoom) return;
+    handleJoinOnlineRoom(recentOnlineRoom.roomCode, recentOnlineRoom.playerName);
+  }, [handleJoinOnlineRoom, recentOnlineRoom]);
+
+  // Accidental Back-Button & Tab-Close Guard while inside an active online match:
+  // Pressing browser/mobile Back opens PauseModal instead of kicking the player out!
+  const isOnlineMatchActive = isOnlineMatch && (screen === 'playing' || screen === 'paused');
+  useEffect(() => {
+    if (!isOnlineMatchActive) {
+      onlineBackGuardPushedRef.current = false;
+      return;
+    }
+
+    if (!onlineBackGuardPushedRef.current) {
+      try {
+        window.history.pushState({ mangoOnlineGuard: true }, '');
+        onlineBackGuardPushedRef.current = true;
+      } catch {
+        // ignore history errors in restricted sandboxes
+      }
+    }
+
+    const onPopState = () => {
+      try {
+        window.history.pushState({ mangoOnlineGuard: true }, '');
+      } catch {
+        // ignore
+      }
+      setScreen('paused');
+    };
+
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+
+    window.addEventListener('popstate', onPopState);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+    };
+  }, [isOnlineMatchActive]);
+
+  // Live Crazy Mode 10-30 min Countdown Timer:
+  // - In Online matches: shows live synced countdown; server enforces expiration authoritatively.
+  // - In Local / Vs Computer matches: pauses cleanly in PauseModal and ranks 1st/2nd/3rd... by progress at 00:00!
+  useEffect(() => {
+    const isCrazyActive =
+      (screen === 'playing' || screen === 'paused') &&
+      gameState.config.mode === 'crazy' &&
+      gameState.phase !== 'finished' &&
+      typeof gameState.crazyTimerEndsAt === 'number';
+
+    if (!isCrazyActive) {
+      pausedCrazyRemainingRef.current = null;
+      setCrazyTimerRemainingMs(null);
+      return;
+    }
+
+    // Freeze local timer while paused; resume seamlessly with remaining ms when returning to playing
+    if (!isOnlineMatch && screen === 'paused') {
+      if (pausedCrazyRemainingRef.current === null) {
+        const rem = Math.max(0, (gameState.crazyTimerEndsAt ?? Date.now()) - Date.now());
+        pausedCrazyRemainingRef.current = rem;
+        setCrazyTimerRemainingMs(rem);
+      }
+      return;
+    }
+
+    if (!isOnlineMatch && screen === 'playing' && pausedCrazyRemainingRef.current !== null) {
+      const resumedEndsAt = Date.now() + pausedCrazyRemainingRef.current;
+      pausedCrazyRemainingRef.current = null;
+      setGameState((prev) => ({ ...prev, crazyTimerEndsAt: resumedEndsAt }));
+      setCrazyTimerRemainingMs(Math.max(0, resumedEndsAt - Date.now()));
+      return;
+    }
+
+    const tickTimer = () => {
+      const endsAt = gameStateRef.current.crazyTimerEndsAt;
+      if (typeof endsAt !== 'number' || gameStateRef.current.phase === 'finished') {
+        setCrazyTimerRemainingMs(null);
+        return;
+      }
+      const rem = Math.max(0, endsAt - Date.now());
+      setCrazyTimerRemainingMs(rem);
+
+      if (rem === 0 && !isOnlineMatchRef.current && screen === 'playing') {
+        clearPendingTimers();
+        const expired = resolveCrazyTimerExpiration(gameStateRef.current);
+        setGameState(expired);
+        const winnerId = expired.finishedOrder[0] ?? 0;
+        const winnerPlayer = expired.players[winnerId];
+        const winnerPal = PLAYER_PALETTES[winnerPlayer?.paletteIndex ?? 0];
+        setCelebrationWinner({
+          name: winnerPlayer?.name ?? 'Champion',
+          color: winnerPal?.color ?? '#FACC15',
+        });
+        setMatchEnded(true);
+        soundFx.playVictoryFanfare();
+        try {
+          localStorage.removeItem(STORAGE_KEY_MATCH);
+          setSavedMatch(null);
+        } catch {
+          // ignore
+        }
+        setScreen('gameover');
+      }
+    };
+
+    tickTimer();
+    const id = window.setInterval(tickTimer, 500);
+    return () => window.clearInterval(id);
+  }, [
+    clearPendingTimers,
+    gameState.config.mode,
+    gameState.crazyTimerEndsAt,
+    gameState.phase,
+    isOnlineMatch,
+    screen,
+  ]);
 
   const handleStartMatch = useCallback(() => {
     clearPendingTimers();
@@ -1976,13 +2277,6 @@ export default function App() {
     };
   }, [myClientId, onlineRoom, remoteSpeakingLocal, voiceUi.joined, voiceUi.localSpeaking, voiceUi.muted]);
 
-  const voiceSpeakingCount = useMemo(() => {
-    if (!effectiveOnlineRoom) return 0;
-    return effectiveOnlineRoom.seats.filter(
-      (s) => s.connected && s.voiceJoined && !s.voiceMuted && s.voiceSpeaking
-    ).length;
-  }, [effectiveOnlineRoom]);
-
   if (screen === 'home') {
     return (
       <HomeScreen
@@ -1998,6 +2292,8 @@ export default function App() {
         onCreateOnlineRoom={handleCreateOnlineRoom}
         onJoinOnlineRoom={handleJoinOnlineRoom}
         onResumeMatch={handleResumeSavedMatch}
+        recentOnlineRoom={recentOnlineRoom}
+        onRejoinRecentRoom={handleRejoinRecentRoom}
       />
     );
   }
@@ -2038,6 +2334,9 @@ export default function App() {
           }))
         }
         onChangeMode={(mode: GameMode) => setConfig((prev) => ({ ...prev, mode }))}
+        onChangeCrazyTimerMinutes={(minutes) =>
+          setConfig((prev) => ({ ...prev, crazyTimerMinutes: clampCrazyTimerMinutes(minutes) }))
+        }
         onChangeTokensPerPlayer={(tokensPerPlayer) =>
           setConfig((prev) => ({ ...prev, tokensPerPlayer }))
         }
@@ -2070,12 +2369,7 @@ export default function App() {
           theme={theme}
           muted={muted}
           onlineRoomCode={effectiveOnlineRoom?.roomCode ?? null}
-          voice={isOnlineMatch ? voiceUi : undefined}
-          voiceSpeakingCount={voiceSpeakingCount}
-          onJoinVoice={isOnlineMatch ? handleJoinVoice : undefined}
-          onLeaveVoice={isOnlineMatch ? handleLeaveVoice : undefined}
-          onToggleVoiceMute={isOnlineMatch ? handleToggleVoiceMute : undefined}
-          onToggleVoiceDeafen={isOnlineMatch ? handleToggleVoiceDeafen : undefined}
+          crazyTimerRemainingMs={crazyTimerRemainingMs}
           onToggleMute={handleToggleMute}
           onOpenPause={() => setScreen('paused')}
           onOpenThemePicker={() => setShowThemeModal(true)}
@@ -2083,26 +2377,48 @@ export default function App() {
           onToggleMobileRoster={() => setShowMobileRoster(true)}
         />
 
-        {isOnlineMatch && voiceUi.error && (
+        {isOnlineMatch && effectiveOnlineRoom && (
+          <InMatchVoiceStrip
+            theme={theme}
+            roomCode={effectiveOnlineRoom.roomCode}
+            voice={voiceUi}
+            seats={effectiveOnlineRoom.seats}
+            onJoinVoice={handleJoinVoice}
+            onLeaveVoice={handleLeaveVoice}
+            onToggleMute={handleToggleVoiceMute}
+            onToggleDeafen={handleToggleVoiceDeafen}
+            onDismissError={() => voiceManagerRef.current?.clearError()}
+          />
+        )}
+
+        {isOnlineMatch && (connectionStatus !== 'connected' || onlineError) && (
           <div className="px-3 sm:px-5 pt-1 shrink-0">
             <div
-              role="alert"
-              data-testid="match-voice-error-banner"
+              role="status"
+              data-testid="match-connection-banner"
               className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm"
               style={{
-                backgroundColor: 'rgba(153, 27, 27, 0.92)',
-                border: '1px solid rgba(248, 113, 113, 0.7)',
-                color: '#FEE2E2',
+                backgroundColor:
+                  onlineError ? 'rgba(153, 27, 27, 0.92)' : 'rgba(180, 83, 9, 0.92)',
+                border: `1px solid ${onlineError ? 'rgba(248, 113, 113, 0.7)' : 'rgba(253, 224, 71, 0.7)'}`,
+                color: '#FEF9C3',
               }}
             >
-              <span>{voiceUi.error}</span>
-              <button
-                type="button"
-                onClick={() => voiceManagerRef.current?.clearError()}
-                className="px-2 py-0.5 rounded text-[11px] font-extrabold bg-black/25 hover:bg-black/40"
-              >
-                Dismiss
-              </button>
+              <span>
+                {onlineError ??
+                  (connectionStatus === 'connecting'
+                    ? 'Reconnecting to room...'
+                    : 'Connection interrupted — automatically reconnecting...')}
+              </span>
+              {onlineError && (
+                <button
+                  type="button"
+                  onClick={() => setOnlineError(null)}
+                  className="px-2 py-0.5 rounded text-[11px] font-extrabold bg-black/25 hover:bg-black/40 shrink-0"
+                >
+                  Dismiss
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -2221,6 +2537,7 @@ export default function App() {
           theme={theme}
           volume={volume}
           muted={muted}
+          onlineRoomCode={effectiveOnlineRoom?.roomCode ?? null}
           onChangeVolume={handleChangeVolume}
           onPreviewVolume={() => soundFx.playVolumePreview()}
           onToggleMute={handleToggleMute}
@@ -2251,7 +2568,7 @@ export default function App() {
         <VictoryModal
           state={gameState}
           theme={theme}
-          canContinueForRanks={remainingUnfinished >= 2}
+          canContinueForRanks={!gameState.endedByTimer && remainingUnfinished >= 2}
           onContinueForRanks={handleContinueForRanks}
           onPlayAgain={handleRestartMatch}
           onBackToTitle={handleLeaveToHome}

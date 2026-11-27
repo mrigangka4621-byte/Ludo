@@ -4,6 +4,7 @@ import {
   Pause,
   RotateCcw,
   RotateCw,
+  Timer,
   Users,
   Volume2,
   VolumeX,
@@ -22,10 +23,9 @@ import type {
   MoveOption,
 } from '../game/types';
 import type { OnlineSeat } from '../multiplayer/protocol';
-import type { VoiceUiSnapshot } from '../multiplayer/voiceChat';
 import { DiceControl } from './DiceControl';
 import { TitleEmblem } from './TitleEmblem';
-import { SeatVoiceBadge, TopBarVoiceControls } from './VoiceIndicators';
+import { SeatVoiceBadge } from './VoiceIndicators';
 
 /**
  * Reusable glossy teardrop pin icon for the bottom arcade player bar & roster.
@@ -72,12 +72,7 @@ interface TopArcadeBarProps {
   theme: BoardTheme;
   muted: boolean;
   onlineRoomCode?: string | null;
-  voice?: VoiceUiSnapshot;
-  voiceSpeakingCount?: number;
-  onJoinVoice?: () => void;
-  onLeaveVoice?: () => void;
-  onToggleVoiceMute?: () => void;
-  onToggleVoiceDeafen?: () => void;
+  crazyTimerRemainingMs?: number | null;
   onToggleMute: () => void;
   onOpenPause: () => void;
   onOpenThemePicker: () => void;
@@ -85,17 +80,19 @@ interface TopArcadeBarProps {
   onToggleMobileRoster?: () => void;
 }
 
+function formatTimerClock(ms: number): string {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export function TopArcadeBar({
   state,
   theme,
   muted,
   onlineRoomCode = null,
-  voice,
-  voiceSpeakingCount = 0,
-  onJoinVoice,
-  onLeaveVoice,
-  onToggleVoiceMute,
-  onToggleVoiceDeafen,
+  crazyTimerRemainingMs = null,
   onToggleMute,
   onOpenPause,
   onOpenThemePicker,
@@ -105,15 +102,23 @@ export function TopArcadeBar({
   const isArcade = theme.id === 'arcade';
   const btnBg = isArcade ? '#0C2D63' : theme.panelBg;
   const btnBorder = isArcade ? '#FACC15' : theme.panelBorder;
+  const showCrazyTimer =
+    state.config.mode === 'crazy' &&
+    typeof crazyTimerRemainingMs === 'number' &&
+    state.phase !== 'finished';
+  const isUrgentTimer = showCrazyTimer && crazyTimerRemainingMs <= 30_000;
+  const isWarnTimer = showCrazyTimer && !isUrgentTimer && crazyTimerRemainingMs <= 120_000;
+  const formattedClock = showCrazyTimer ? formatTimerClock(crazyTimerRemainingMs) : '';
 
   return (
-    <div className="w-full flex items-center justify-between gap-2 px-3 sm:px-5 pt-2.5 pb-1 shrink-0">
-      <div className="flex items-center gap-2.5 min-w-0">
+    <div className="w-full flex flex-col shrink-0">
+    <div className="w-full flex items-center justify-between gap-1.5 sm:gap-2 px-2.5 sm:px-5 pt-2.5 pb-1 shrink-0">
+      <div className="flex items-center gap-2 min-w-0">
         <TitleEmblem theme={theme} compact />
         {onlineRoomCode && (
           <div
             data-testid="topbar-room-code"
-            className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-mono-num text-xs font-extrabold tracking-wider shadow-sm"
+            className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-mono-num text-xs font-extrabold tracking-wider shadow-sm shrink-0"
             style={{
               backgroundColor: 'rgba(11, 28, 61, 0.85)',
               color: '#FDE047',
@@ -123,25 +128,30 @@ export function TopArcadeBar({
             <span>ROOM {onlineRoomCode}</span>
           </div>
         )}
+        {showCrazyTimer && (
+          <div
+            data-testid="crazy-timer-badge"
+            aria-label={`Crazy Mode time remaining ${formattedClock}`}
+            className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-mono-num text-xs font-extrabold tracking-wider shadow-sm shrink-0 ${
+              isUrgentTimer ? 'animate-pulse' : ''
+            }`}
+            style={{
+              backgroundColor: isUrgentTimer
+                ? 'rgba(185, 28, 28, 0.92)'
+                : isWarnTimer
+                  ? 'rgba(180, 83, 9, 0.92)'
+                  : 'rgba(194, 65, 12, 0.9)',
+              color: '#FEF9C3',
+              border: `1.5px solid ${isUrgentTimer ? '#FCA5A5' : '#FDBA74'}`,
+            }}
+          >
+            <Timer size={13} />
+            <span>{formattedClock}</span>
+          </div>
+        )}
       </div>
 
-      <div className="flex items-center gap-1.5 shrink-0">
-        {onlineRoomCode &&
-          voice &&
-          onJoinVoice &&
-          onLeaveVoice &&
-          onToggleVoiceMute &&
-          onToggleVoiceDeafen && (
-            <TopBarVoiceControls
-              theme={theme}
-              voice={voice}
-              speakingCount={voiceSpeakingCount}
-              onJoinVoice={onJoinVoice}
-              onLeaveVoice={onLeaveVoice}
-              onToggleMute={onToggleVoiceMute}
-              onToggleDeafen={onToggleVoiceDeafen}
-            />
-          )}
+      <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
         {onToggleMobileRoster && (
           <button
             type="button"
@@ -151,14 +161,14 @@ export function TopArcadeBar({
               onToggleMobileRoster();
             }}
             aria-label={`View all ${state.players.length} players`}
-            className="lg:hidden h-9 px-2.5 rounded-lg flex items-center gap-1.5 text-xs font-bold shadow-sm"
+            className="lg:hidden h-8 sm:h-9 px-2 sm:px-2.5 rounded-lg flex items-center gap-1 sm:gap-1.5 text-xs font-bold shadow-sm"
             style={{
               backgroundColor: btnBg,
               color: theme.textPrimary,
               border: `1.5px solid ${btnBorder}`,
             }}
           >
-            <Users size={15} />
+            <Users size={14} />
             <span className="font-mono-num">{state.players.length}</span>
           </button>
         )}
@@ -171,14 +181,14 @@ export function TopArcadeBar({
           }}
           aria-label="Change board theme"
           title="Board Theme"
-          className="w-9 h-9 rounded-lg flex items-center justify-center shadow-sm transition-transform active:scale-95"
+          className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center shadow-sm transition-transform active:scale-95"
           style={{
             backgroundColor: btnBg,
             color: theme.textPrimary,
             border: `1.5px solid ${btnBorder}`,
           }}
         >
-          <Palette size={16} />
+          <Palette size={15} />
         </button>
         <button
           type="button"
@@ -189,14 +199,14 @@ export function TopArcadeBar({
           }}
           aria-label="View game rules"
           title="Rules"
-          className="w-9 h-9 rounded-lg flex items-center justify-center shadow-sm transition-transform active:scale-95"
+          className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center shadow-sm transition-transform active:scale-95"
           style={{
             backgroundColor: btnBg,
             color: theme.textPrimary,
             border: `1.5px solid ${btnBorder}`,
           }}
         >
-          <BookOpen size={16} />
+          <BookOpen size={15} />
         </button>
         <button
           type="button"
@@ -207,14 +217,14 @@ export function TopArcadeBar({
           }}
           aria-label={muted ? 'Unmute audio' : 'Mute audio'}
           title={muted ? 'Unmute (M)' : 'Mute (M)'}
-          className="w-9 h-9 rounded-lg flex items-center justify-center shadow-sm transition-transform active:scale-95"
+          className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center shadow-sm transition-transform active:scale-95"
           style={{
             backgroundColor: btnBg,
             color: theme.textPrimary,
             border: `1.5px solid ${btnBorder}`,
           }}
         >
-          {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+          {muted ? <VolumeX size={15} /> : <Volume2 size={15} />}
         </button>
         <button
           type="button"
@@ -225,16 +235,39 @@ export function TopArcadeBar({
           }}
           aria-label="Pause match"
           title="Pause (P)"
-          className="w-9 h-9 rounded-lg flex items-center justify-center shadow-sm transition-transform active:scale-95"
+          className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center shadow-sm transition-transform active:scale-95"
           style={{
             backgroundColor: btnBg,
             color: theme.textPrimary,
             border: `1.5px solid ${btnBorder}`,
           }}
         >
-          <Pause size={16} />
+          <Pause size={15} />
         </button>
       </div>
+    </div>
+    {showCrazyTimer && (
+      <div className="sm:hidden px-2.5 pt-0.5 pb-0.5 flex items-center justify-center">
+        <div
+          data-testid="crazy-timer-badge-mobile"
+          className={`inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full font-mono-num text-[11px] font-extrabold tracking-wider shadow-sm ${
+            isUrgentTimer ? 'animate-pulse' : ''
+          }`}
+          style={{
+            backgroundColor: isUrgentTimer
+              ? 'rgba(185, 28, 28, 0.92)'
+              : isWarnTimer
+                ? 'rgba(180, 83, 9, 0.92)'
+                : 'rgba(194, 65, 12, 0.9)',
+            color: '#FEF9C3',
+            border: `1px solid ${isUrgentTimer ? '#FCA5A5' : '#FDBA74'}`,
+          }}
+        >
+          <Timer size={12} />
+          <span>Crazy Timer · {formattedClock}</span>
+        </div>
+      </div>
+    )}
     </div>
   );
 }
@@ -561,7 +594,7 @@ export function PlayerStandingsPanel({
             (state.config.mode === 'classic' || state.config.mode === 'flip') &&
             player.finishedRank === null &&
             activeOnBoard === 0 &&
-            (isComebackMercy ? stuckRolls >= 3 : stuckRolls >= 6);
+            (isComebackMercy ? stuckRolls >= 2 : stuckRolls >= 6);
 
           const hasRevengeCharge =
             state.config.mode === 'crazy' && Boolean(state.crazyRevengeCharges?.[player.id]);

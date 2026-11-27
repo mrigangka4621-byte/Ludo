@@ -2,6 +2,7 @@ import { buildBoardGeometry } from '../game/boardGeometry.ts';
 import {
   applyDiceRoll,
   chooseBestBotMove,
+  clampCrazyTimerMinutes,
   COMEBACK_YARD_MERCY_CHANCES,
   commitMove,
   createDefaultPlayers,
@@ -9,6 +10,7 @@ import {
   getAllLegalMoves,
   getNextActivePlayerIndex,
   resolveCrazyStarChaos,
+  resolveCrazyTimerExpiration,
   rollSmartDie,
   YARD_MERCY_CHANCES,
 } from '../game/engine.ts';
@@ -52,6 +54,7 @@ export interface ManagedRoom {
   tokensPerPlayer: 2 | 4;
   themeId: ThemeId;
   fillWithBots: boolean;
+  crazyTimerMinutes: number;
   seats: OnlineSeat[];
   gameState: GameState | null;
   createdAt: number;
@@ -79,6 +82,36 @@ function sanitizeName(raw: string, fallback: string): string {
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
+function isGenericDefaultPlayerName(raw: string): boolean {
+  const cleaned = raw.trim().replace(/\s+/g, ' ');
+  return cleaned.length === 0 || /^player(\s*1)?$/i.test(cleaned);
+}
+
+/**
+ * When a joining player didn't change their default name (blank, "Player", or "Player 1"),
+ * assign proper sequential names ("Player 2", "Player 3", "Player 4", ...) without duplicates.
+ */
+function resolveJoinedPlayerName(
+  raw: string,
+  seatIndex: number,
+  existingNames: string[]
+): string {
+  const cleaned = raw.trim().replace(/\s+/g, ' ').slice(0, 18);
+  if (!isGenericDefaultPlayerName(cleaned)) {
+    return cleaned;
+  }
+  const taken = new Set(existingNames.map((n) => n.trim().toLowerCase()));
+  const preferred = Math.max(1, seatIndex + 1);
+  if (!taken.has(`player ${preferred}`)) {
+    return `Player ${preferred}`;
+  }
+  let num = 1;
+  while (taken.has(`player ${num}`)) {
+    num += 1;
+  }
+  return `Player ${num}`;
+}
+
 function normalizeRoomCode(raw: string): string {
   return raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
@@ -102,6 +135,7 @@ export function snapshotRoom(room: ManagedRoom): OnlineRoomSnapshot {
     tokensPerPlayer: room.tokensPerPlayer,
     themeId: room.themeId,
     fillWithBots: room.fillWithBots,
+    crazyTimerMinutes: room.crazyTimerMinutes,
     seats: room.seats.map((s) => ({ ...s })),
     createdAt: room.createdAt,
   };
@@ -142,7 +176,7 @@ export class RoomManager {
   }
 
   getSeatIndex(room: ManagedRoom, clientId: string): number {
-    return room.seats.findIndex((s) => s.clientId === clientId);
+    return room.seats.find((s) => s.clientId === clientId)?.seatIndex ?? -1;
   }
 
   createRoom(params: {
@@ -153,19 +187,24 @@ export class RoomManager {
     tokensPerPlayer: 2 | 4;
     themeId: ThemeId;
     fillWithBots?: boolean;
+    crazyTimerMinutes?: number;
   }): { room: ManagedRoom; seatIndex: number } {
     // If client was previously in another room, remove cleanly first
     this.leaveRoom(params.clientId);
 
     const playerCount = Math.max(2, Math.min(10, Math.round(params.playerCount)));
     const tokensPerPlayer: 2 | 4 = params.tokensPerPlayer === 2 ? 2 : 4;
+    const crazyTimerMinutes = clampCrazyTimerMinutes(params.crazyTimerMinutes);
     const roomCode = this.generateRoomCode();
     const now = Date.now();
+    const hostName = isGenericDefaultPlayerName(params.playerName)
+      ? 'Player 1'
+      : sanitizeName(params.playerName, 'Player 1');
 
     const hostSeat: OnlineSeat = {
       seatIndex: 0,
       clientId: params.clientId,
-      name: sanitizeName(params.playerName, 'Player 1'),
+      name: hostName,
       connected: true,
       isHost: true,
       paletteIndex: createDefaultPlayers(playerCount)[0].paletteIndex,
@@ -183,6 +222,7 @@ export class RoomManager {
       tokensPerPlayer,
       themeId: params.themeId,
       fillWithBots: params.fillWithBots ?? true,
+      crazyTimerMinutes,
       seats: [hostSeat],
       gameState: null,
       createdAt: now,
@@ -198,7 +238,15 @@ export class RoomManager {
     clientId: string;
     roomCode: string;
     playerName: string;
-  }): { ok: true; room: ManagedRoom; seatIndex: number } | RoomActionError {
+  }):
+    | {
+        ok: true;
+        room: ManagedRoom;
+        seatIndex: number;
+        stateSynced?: boolean;
+        replacedClientId?: string;
+      }
+    | RoomActionError {
     const code = normalizeRoomCode(params.roomCode);
     const room = this.rooms.get(code);
     if (!room) {
@@ -209,23 +257,177 @@ export class RoomManager {
       };
     }
 
-    // Reconnecting player reclaims their existing seat cleanly
-    const existingIdx = room.seats.findIndex((s) => s.clientId === params.clientId);
-    if (existingIdx !== -1) {
-      room.seats[existingIdx].connected = true;
-      if (params.playerName.trim()) {
-        room.seats[existingIdx].name = sanitizeName(params.playerName, room.seats[existingIdx].name);
+    const ensureConnectedHost = () => {
+      const currentHostConnected = room.seats.some(
+        (s) => s.clientId === room.hostClientId && s.connected
+      );
+      if (!currentHostConnected) {
+        room.hostClientId = params.clientId;
+        room.seats.forEach((s) => {
+          s.isHost = s.clientId === params.clientId;
+        });
       }
+    };
+
+    // Priority 1: Reconnecting player with same clientId reclaims their existing seat cleanly
+    const existingSeat = room.seats.find((s) => s.clientId === params.clientId);
+    if (existingSeat) {
+      existingSeat.connected = true;
+      if (params.playerName.trim() && !isGenericDefaultPlayerName(params.playerName)) {
+        existingSeat.name = sanitizeName(params.playerName, existingSeat.name);
+      }
+      let stateSynced = false;
+      if (room.gameState && room.gameState.players[existingSeat.seatIndex]) {
+        const humanName = existingSeat.name;
+        const wasBot = room.gameState.players[existingSeat.seatIndex].isBot;
+        room.gameState = {
+          ...room.gameState,
+          players: room.gameState.players.map((p, idx) =>
+            idx === existingSeat.seatIndex ? { ...p, isBot: false, name: humanName } : p
+          ),
+          lastEvent: wasBot
+            ? {
+                id: (room.gameState.lastEvent?.id ?? 0) + 1,
+                message: `${humanName} rejoined the match and reclaimed their pawns!`,
+                playerId: existingSeat.seatIndex,
+                kind: 'info',
+              }
+            : room.gameState.lastEvent,
+        };
+        stateSynced = true;
+      }
+      ensureConnectedHost();
       room.lastActivityAt = Date.now();
       this.clientToRoom.set(params.clientId, code);
-      return { ok: true, room, seatIndex: existingIdx };
+      return { ok: true, room, seatIndex: existingSeat.seatIndex, stateSynced };
     }
 
+    // Priority 2 & 3: Mid-game rejoin (e.g. after pressing Back / new tab) OR substitute player takeover!
     if (room.status === 'playing') {
+      if (!room.gameState) {
+        return {
+          ok: false,
+          code: 'MATCH_IN_PROGRESS',
+          message: 'This room has already started its match.',
+        };
+      }
+
+      const cleanRequestedName = params.playerName.trim();
+      const lowerRequested = cleanRequestedName.toLowerCase();
+
+      // 2a. Look for a disconnected/left human seat — prefer matching player name first so
+      // a player returning on a fresh tab/device gets their exact same color & pawns!
+      const disconnectedSeats = room.seats.filter((s) => !s.connected);
+      const targetSeat =
+        (lowerRequested
+          ? disconnectedSeats.find((s) => s.name.trim().toLowerCase() === lowerRequested)
+          : undefined) ?? disconnectedSeats[0];
+
+      if (targetSeat) {
+        // Leave any previous room before taking over this seat
+        this.leaveRoom(params.clientId);
+        const replacedClientId = targetSeat.clientId;
+        if (this.clientToRoom.get(replacedClientId) === code) {
+          this.clientToRoom.delete(replacedClientId);
+        }
+
+        const oldName = targetSeat.name;
+        const otherSeatNames = room.seats
+          .filter((s) => s.seatIndex !== targetSeat.seatIndex)
+          .map((s) => s.name);
+        const exactNameRejoin =
+          cleanRequestedName.length > 0 &&
+          oldName.trim().toLowerCase() === lowerRequested;
+        const nextName = exactNameRejoin
+          ? oldName
+          : resolveJoinedPlayerName(params.playerName, targetSeat.seatIndex, otherSeatNames);
+        const sameName = oldName.trim().toLowerCase() === nextName.trim().toLowerCase();
+
+        targetSeat.clientId = params.clientId;
+        targetSeat.name = nextName;
+        targetSeat.connected = true;
+        targetSeat.voiceJoined = false;
+        targetSeat.voiceMuted = false;
+        targetSeat.voiceSpeaking = false;
+
+        room.gameState = {
+          ...room.gameState,
+          players: room.gameState.players.map((p, idx) =>
+            idx === targetSeat.seatIndex ? { ...p, isBot: false, name: nextName } : p
+          ),
+          lastEvent: {
+            id: (room.gameState.lastEvent?.id ?? 0) + 1,
+            message: sameName
+              ? `${nextName} rejoined the match!`
+              : `${nextName} joined mid-game and took over ${oldName}'s pawns!`,
+            playerId: targetSeat.seatIndex,
+            kind: 'info',
+          },
+        };
+
+        ensureConnectedHost();
+        room.lastActivityAt = Date.now();
+        this.clientToRoom.set(params.clientId, code);
+        return {
+          ok: true,
+          room,
+          seatIndex: targetSeat.seatIndex,
+          stateSynced: true,
+          replacedClientId,
+        };
+      }
+
+      // 2b. No vacated human seat — allow joining mid-game into any open CPU-filled seat!
+      const openBotIdx = room.gameState.players.findIndex(
+        (p, idx) =>
+          p.isBot && !room.seats.some((s) => s.seatIndex === idx && s.connected)
+      );
+      if (openBotIdx !== -1) {
+        this.leaveRoom(params.clientId);
+        const botPlayer = room.gameState.players[openBotIdx];
+        const nextName = resolveJoinedPlayerName(
+          params.playerName,
+          openBotIdx,
+          room.seats.map((s) => s.name)
+        );
+        const newSeat: OnlineSeat = {
+          seatIndex: openBotIdx,
+          clientId: params.clientId,
+          name: nextName,
+          connected: true,
+          isHost: false,
+          paletteIndex: botPlayer.paletteIndex,
+          voiceJoined: false,
+          voiceMuted: false,
+          voiceSpeaking: false,
+        };
+        room.seats = [...room.seats.filter((s) => s.seatIndex !== openBotIdx), newSeat].sort(
+          (a, b) => a.seatIndex - b.seatIndex
+        );
+
+        room.gameState = {
+          ...room.gameState,
+          players: room.gameState.players.map((p, idx) =>
+            idx === openBotIdx ? { ...p, isBot: false, name: nextName } : p
+          ),
+          lastEvent: {
+            id: (room.gameState.lastEvent?.id ?? 0) + 1,
+            message: `${nextName} joined mid-game and took over ${botPlayer.name}'s pawns!`,
+            playerId: openBotIdx,
+            kind: 'info',
+          },
+        };
+
+        ensureConnectedHost();
+        room.lastActivityAt = Date.now();
+        this.clientToRoom.set(params.clientId, code);
+        return { ok: true, room, seatIndex: openBotIdx, stateSynced: true };
+      }
+
       return {
         ok: false,
-        code: 'MATCH_IN_PROGRESS',
-        message: 'This room has already started its match.',
+        code: 'ROOM_FULL',
+        message: `All seats in room ${code} are currently occupied by active players.`,
       };
     }
 
@@ -242,10 +444,15 @@ export class RoomManager {
 
     const nextSeatIndex = room.seats.length;
     const defaults = createDefaultPlayers(room.playerCount);
+    const assignedName = resolveJoinedPlayerName(
+      params.playerName,
+      nextSeatIndex,
+      room.seats.map((s) => s.name)
+    );
     room.seats.push({
       seatIndex: nextSeatIndex,
       clientId: params.clientId,
-      name: sanitizeName(params.playerName, `Player ${nextSeatIndex + 1}`),
+      name: assignedName,
       connected: true,
       isHost: false,
       paletteIndex: defaults[nextSeatIndex]?.paletteIndex ?? nextSeatIndex % 10,
@@ -271,6 +478,48 @@ export class RoomManager {
       seat.voiceSpeaking = false;
       room.lastActivityAt = Date.now();
     }
+    return room;
+  }
+
+  /**
+   * Called after a short disconnect grace period during an active match:
+   * hands a still-disconnected player's seat over to CPU so the match never stalls,
+   * while keeping the seat open for the same player OR any substitute to join with the room code.
+   */
+  takeoverDisconnectedSeatWithBot(roomCode: string, clientId: string): ManagedRoom | null {
+    const room = this.rooms.get(roomCode);
+    if (!room || room.status !== 'playing' || !room.gameState) return null;
+    const seat = room.seats.find((s) => s.clientId === clientId);
+    if (!seat || seat.connected) return null;
+    const player = room.gameState.players[seat.seatIndex];
+    if (!player || player.isBot) return null;
+
+    room.gameState = {
+      ...room.gameState,
+      players: room.gameState.players.map((p, pIdx) =>
+        pIdx === seat.seatIndex
+          ? { ...p, isBot: true, name: `${p.name.replace(/ \(CPU\)$/, '')} (CPU)` }
+          : p
+      ),
+      lastEvent: {
+        id: (room.gameState.lastEvent?.id ?? 0) + 1,
+        message: `${seat.name} disconnected — CPU is holding their seat (rejoin with ${room.roomCode}).`,
+        playerId: seat.seatIndex,
+        kind: 'info',
+      },
+    };
+
+    if (room.hostClientId === clientId) {
+      const nextHost = room.seats.find((s) => s.connected);
+      if (nextHost) {
+        room.hostClientId = nextHost.clientId;
+        room.seats.forEach((s) => {
+          s.isHost = s.clientId === nextHost.clientId;
+        });
+      }
+    }
+
+    room.lastActivityAt = Date.now();
     return room;
   }
 
@@ -320,6 +569,36 @@ export class RoomManager {
     return room;
   }
 
+  getVoiceRelayRecipients(fromClientId: string, requestedTargetIds: string[]): string[] {
+    if (!fromClientId || !Array.isArray(requestedTargetIds) || requestedTargetIds.length === 0) {
+      return [];
+    }
+    const room = this.getRoomByClientId(fromClientId);
+    if (!room) return [];
+    const fromSeat = room.seats.find(
+      (s) => s.clientId === fromClientId && s.connected && s.voiceJoined === true && !s.voiceMuted
+    );
+    if (!fromSeat) return [];
+
+    const allowed = new Set(
+      room.seats
+        .filter((s) => s.clientId !== fromClientId && s.connected && s.voiceJoined === true)
+        .map((s) => s.clientId)
+    );
+    const recipients: string[] = [];
+    const seen = new Set<string>();
+    for (const id of requestedTargetIds) {
+      if (allowed.has(id) && !seen.has(id)) {
+        seen.add(id);
+        recipients.push(id);
+      }
+    }
+    if (recipients.length > 0) {
+      room.lastActivityAt = Date.now();
+    }
+    return recipients;
+  }
+
   leaveRoom(clientId: string): { room: ManagedRoom | null; deleted: boolean } {
     const code = this.clientToRoom.get(clientId);
     if (!code) return { room: null, deleted: false };
@@ -346,32 +625,28 @@ export class RoomManager {
       return { room, deleted: false };
     }
 
-    // During a live match: mark seat disconnected & hand it over to CPU bot so others never get stuck!
-    room.seats[idx].connected = false;
-    room.seats[idx].voiceJoined = false;
-    room.seats[idx].voiceMuted = false;
-    room.seats[idx].voiceSpeaking = false;
-    if (room.gameState && room.gameState.players[idx]) {
+    // During a live match: mark seat disconnected & hand it over to CPU bot so others never get stuck,
+    // and KEEP the room alive (until idle TTL) so the player or any friend can rejoin using the same code!
+    const seat = room.seats[idx];
+    seat.connected = false;
+    seat.voiceJoined = false;
+    seat.voiceMuted = false;
+    seat.voiceSpeaking = false;
+    if (room.gameState && room.gameState.players[seat.seatIndex]) {
       room.gameState = {
         ...room.gameState,
         players: room.gameState.players.map((p, pIdx) =>
-          pIdx === idx
+          pIdx === seat.seatIndex
             ? { ...p, isBot: true, name: `${p.name.replace(/ \(CPU\)$/, '')} (CPU)` }
             : p
         ),
         lastEvent: {
           id: (room.gameState.lastEvent?.id ?? 0) + 1,
-          message: `${room.seats[idx].name} left — CPU took over their pawns.`,
-          playerId: idx,
+          message: `${seat.name} left — CPU is holding their seat (rejoin anytime with ${room.roomCode}).`,
+          playerId: seat.seatIndex,
           kind: 'info',
         },
       };
-    }
-
-    const anyConnected = room.seats.some((s) => s.connected);
-    if (!anyConnected) {
-      this.rooms.delete(code);
-      return { room: null, deleted: true };
     }
 
     if (room.hostClientId === clientId) {
@@ -395,6 +670,7 @@ export class RoomManager {
       playerCount?: number;
       tokensPerPlayer?: 2 | 4;
       fillWithBots?: boolean;
+      crazyTimerMinutes?: number;
     }
   ): RoomResult {
     const room = this.getRoomByClientId(clientId);
@@ -419,6 +695,9 @@ export class RoomManager {
     }
     if (typeof patch.fillWithBots === 'boolean') {
       room.fillWithBots = patch.fillWithBots;
+    }
+    if (typeof patch.crazyTimerMinutes === 'number') {
+      room.crazyTimerMinutes = clampCrazyTimerMinutes(patch.crazyTimerMinutes);
     }
 
     room.lastActivityAt = Date.now();
@@ -468,13 +747,27 @@ export class RoomManager {
       tokensPerPlayer: room.tokensPerPlayer,
       themeId: room.themeId,
       players,
+      crazyTimerMinutes: room.crazyTimerMinutes,
     };
 
     room.status = 'playing';
-    room.gameState = createInitialGameState(config);
+    room.gameState = createInitialGameState(config, this.rng);
     room.lastActivityAt = Date.now();
 
     return { ok: true, room, started: true };
+  }
+
+  /**
+   * Authoritatively expires a Crazy Mode room timer and ranks all players 1st, 2nd, 3rd, ... by progress.
+   */
+  expireCrazyTimer(roomCode: string): ManagedRoom | null {
+    const room = this.rooms.get(normalizeRoomCode(roomCode));
+    if (!room || room.status !== 'playing' || !room.gameState) return null;
+    if (room.gameState.config.mode !== 'crazy' || room.gameState.phase === 'finished') return null;
+
+    room.gameState = resolveCrazyTimerExpiration(room.gameState);
+    room.lastActivityAt = Date.now();
+    return room;
   }
 
   /**

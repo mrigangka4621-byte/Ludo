@@ -1,6 +1,23 @@
 import { useMemo, useState } from 'react';
-import { ArrowLeft, Bot, ChevronDown, ChevronUp, Play, RotateCcw, RotateCw, User } from 'lucide-react';
-import { createInitialGameState } from '../game/engine';
+import {
+  ArrowLeft,
+  Bot,
+  ChevronDown,
+  ChevronUp,
+  Minus,
+  Play,
+  Plus,
+  RotateCcw,
+  RotateCw,
+  Timer,
+  User,
+} from 'lucide-react';
+import {
+  clampCrazyTimerMinutes,
+  CRAZY_TIMER_MAX_MINUTES,
+  CRAZY_TIMER_MIN_MINUTES,
+  createInitialGameState,
+} from '../game/engine';
 import { soundFx } from '../game/sound';
 import { BOARD_THEMES, PLAYER_PALETTES, THEME_LIST } from '../game/themes';
 import type { GameConfig, GameMode, MoveDirection, ThemeId } from '../game/types';
@@ -15,6 +32,7 @@ interface SetupScreenProps {
   onBackToHome: () => void;
   onChangePlayerCount: (count: number) => void;
   onChangeMode: (mode: GameMode) => void;
+  onChangeCrazyTimerMinutes: (minutes: number) => void;
   onChangeTokensPerPlayer: (count: 2 | 4) => void;
   onChangeTheme: (themeId: ThemeId) => void;
   onUpdatePlayer: (index: number, patch: { name?: string; isBot?: boolean }) => void;
@@ -31,6 +49,7 @@ export function SetupScreen({
   onBackToHome,
   onChangePlayerCount,
   onChangeMode,
+  onChangeCrazyTimerMinutes,
   onChangeTokensPerPlayer,
   onChangeTheme,
   onUpdatePlayer,
@@ -280,13 +299,94 @@ export function SetupScreen({
             </div>
             <p className="text-xs leading-relaxed" style={{ color: theme.textSecondary }}>
               {config.mode === 'flip'
-                ? 'Choose Forward or Backward each turn to ambush rivals or complete a reverse lap. Opening Mercy 6 after 10 misses; Comeback Mercy 6 in max 8 rolls (+50% 6 chance) if captured back to Home Yard!'
+                ? 'Choose Forward or Backward each turn to ambush rivals or complete a reverse lap. Opening Mercy 6 after 10 misses; Comeback Mercy 6 in max 5 rolls (+50% 6 chance) if captured back to Home Yard!'
                 : config.mode === 'crazy'
-                  ? 'Pure chaos! Boosted 6s (capped at Double Six — after two 6s your bonus roll is guaranteed 1–5!), guaranteed capture snipe whenever a rival is 1–6 steps ahead, Revenge 6s after getting kicked, and wild Chaos Star events (+2 Turbo, Swaparoo, Bonus Roll)!'
+                  ? 'Pure chaos with a 10–30 min timer! Boosted 6s (capped at Double Six — bonus roll guaranteed 1–5), guaranteed capture snipes, Revenge 6s, and Chaos Star events. If time runs out, 1st, 2nd, 3rd... are decided by progress!'
                   : config.mode === 'uno'
                     ? 'No dice — play from 6 UNO cards in your Home Yard! All pawns start ready on Start Squares. Capture rivals back to Start for bonus plays, or drop Reverse, Skip, Swap, and stackable -2 / -4 knockbacks!'
-                    : 'Traditional clockwise race with safe stars, bonus rolls on 6s, opponent captures, 10-roll opening Mercy 6, and 8-roll (+50% boosted) Comeback Mercy 6 if captured back to Home Yard!'}
+                    : 'Traditional clockwise race with safe stars, bonus rolls on 6s, opponent captures, 10-roll opening Mercy 6, and 5-roll (+50% boosted) Comeback Mercy 6 if captured back to Home Yard!'}
             </p>
+
+            {config.mode === 'crazy' && (
+              <div
+                data-testid="setup-crazy-timer"
+                className="rounded-xl p-3 space-y-2"
+                style={{
+                  backgroundColor: 'rgba(249, 115, 22, 0.14)',
+                  border: '1.5px solid rgba(251, 146, 60, 0.55)',
+                }}
+              >
+                <div className="flex items-center justify-between gap-2 text-xs font-bold">
+                  <span className="inline-flex items-center gap-1.5 text-orange-200">
+                    <Timer size={14} className="text-orange-300" />
+                    <span>Crazy Match Timer (10–30 min)</span>
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      aria-label="Decrease Crazy timer by 1 minute"
+                      data-testid="setup-crazy-timer-dec"
+                      disabled={clampCrazyTimerMinutes(config.crazyTimerMinutes) <= CRAZY_TIMER_MIN_MINUTES}
+                      onClick={() => {
+                        soundFx.playButtonClick();
+                        onChangeCrazyTimerMinutes(
+                          clampCrazyTimerMinutes((config.crazyTimerMinutes ?? 15) - 1)
+                        );
+                      }}
+                      className="w-6 h-6 rounded-md flex items-center justify-center bg-black/35 text-orange-200 border border-orange-300/40 disabled:opacity-35"
+                    >
+                      <Minus size={12} />
+                    </button>
+                    <span
+                      data-testid="setup-crazy-timer-value"
+                      className="font-mono-num text-xs font-extrabold text-yellow-300 min-w-[46px] text-center"
+                    >
+                      {clampCrazyTimerMinutes(config.crazyTimerMinutes)} min
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Increase Crazy timer by 1 minute"
+                      data-testid="setup-crazy-timer-inc"
+                      disabled={clampCrazyTimerMinutes(config.crazyTimerMinutes) >= CRAZY_TIMER_MAX_MINUTES}
+                      onClick={() => {
+                        soundFx.playButtonClick();
+                        onChangeCrazyTimerMinutes(
+                          clampCrazyTimerMinutes((config.crazyTimerMinutes ?? 15) + 1)
+                        );
+                      }}
+                      className="w-6 h-6 rounded-md flex items-center justify-center bg-black/35 text-orange-200 border border-orange-300/40 disabled:opacity-35"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-5 gap-1.5">
+                  {[10, 15, 20, 25, 30].map((mins) => {
+                    const active = clampCrazyTimerMinutes(config.crazyTimerMinutes) === mins;
+                    return (
+                      <button
+                        key={mins}
+                        type="button"
+                        data-testid={`setup-crazy-timer-${mins}`}
+                        aria-pressed={active}
+                        onClick={() => {
+                          soundFx.playButtonClick();
+                          onChangeCrazyTimerMinutes(mins);
+                        }}
+                        className="py-1 rounded-lg font-mono-num text-[11px] font-extrabold transition-transform active:scale-95"
+                        style={{
+                          backgroundColor: active ? '#F97316' : theme.panelMutedBg,
+                          color: active ? '#FFFFFF' : '#FED7AA',
+                          border: `1px solid ${active ? '#FEF08A' : 'rgba(251, 146, 60, 0.35)'}`,
+                        }}
+                      >
+                        {mins}m
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* 2. Player Count (2 to 10) */}

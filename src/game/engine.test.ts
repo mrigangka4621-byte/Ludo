@@ -8,8 +8,13 @@ import {
 import {
   applyDiceRoll,
   chooseBestBotMove,
+  clampCrazyTimerMinutes,
   COMEBACK_YARD_MERCY_CHANCES,
   commitMove,
+  computePlayerProgress,
+  CRAZY_TIMER_DEFAULT_MINUTES,
+  CRAZY_TIMER_MAX_MINUTES,
+  CRAZY_TIMER_MIN_MINUTES,
   createDefaultPlayers,
   createInitialGameState,
   getAllLegalMoves,
@@ -18,6 +23,7 @@ import {
   isRingSquareSafe,
   MAX_FIRE_STREAK_ROLLS,
   resolveCrazyStarChaos,
+  resolveCrazyTimerExpiration,
   rollSmartDie,
   YARD_MERCY_CHANCES,
 } from './engine';
@@ -43,6 +49,7 @@ function makeConfig(overrides: Partial<GameConfig> = {}): GameConfig {
     tokensPerPlayer: overrides.tokensPerPlayer ?? 4,
     themeId: overrides.themeId ?? 'walnut',
     players: overrides.players ?? createDefaultPlayers(playerCount),
+    crazyTimerMinutes: overrides.crazyTimerMinutes,
   };
 }
 
@@ -1025,7 +1032,7 @@ test('UNO Ludo Reverse flips turn order, Skip skips next player, and -2/-4 stack
   assert.equal(afterKb.activePlayerIndex, 0);
 });
 
-test('Classic & Flip-Track Comeback Mercy 6: max 8 rolls and +50% boosted 6 chance (25%) after getting captured back to Home Yard', () => {
+test('Classic & Flip-Track Comeback Mercy 6: max 5 rolls and +50% boosted 6 chance (25%) after getting captured back to Home Yard', () => {
   for (const mode of ['classic', 'flip'] as const) {
     const state = createInitialGameState(makeConfig({ playerCount: 4, mode }));
 
@@ -1074,8 +1081,8 @@ test('Classic & Flip-Track Comeback Mercy 6: max 8 rolls and +50% boosted 6 chan
       `Expected ~100/400 (25%) Comeback 6 rolls in ${mode}, got ${comebackSixes}`
     );
 
-    // 4) Force 8 consecutive misses (rng=0.9 -> non-6 because 0.9 >= 0.25) -> roll #9 MUST be Comeback Mercy 6!
-    assert.equal(COMEBACK_YARD_MERCY_CHANCES, 8);
+    // 4) Force 5 consecutive misses (rng=0.9 -> non-6 because 0.9 >= 0.25) -> roll #6 MUST be Comeback Mercy 6!
+    assert.equal(COMEBACK_YARD_MERCY_CHANCES, 5);
     let stuckState = comebackState;
     for (let attempt = 1; attempt <= COMEBACK_YARD_MERCY_CHANCES; attempt++) {
       const res = rollSmartDie(stuckState, () => 0.9);
@@ -1251,6 +1258,102 @@ test('UNO Mode capture on a rival knocked backwards behind Start Square applies 
   assert.deepEqual(animPath[0], geom.trackCells[victimRing].center);
   assert.deepEqual(animPath[animPath.length - 1], geom.trackCells[expectedPenalizedRing].center);
 });
+
+test('Crazy Mode timer clamps to 10-30 min and ranks 1st, 2nd, 3rd, 4th by board progress when timer runs out', () => {
+  // Clamping checks
+  assert.equal(clampCrazyTimerMinutes(undefined), CRAZY_TIMER_DEFAULT_MINUTES);
+  assert.equal(clampCrazyTimerMinutes(5), CRAZY_TIMER_MIN_MINUTES);
+  assert.equal(clampCrazyTimerMinutes(99), CRAZY_TIMER_MAX_MINUTES);
+  assert.equal(clampCrazyTimerMinutes(18.6), 19);
+
+  // Classic mode does NOT get a Crazy timer
+  const classicState = createInitialGameState(makeConfig({ mode: 'classic', crazyTimerMinutes: 20 }), Math.random, 10_000);
+  assert.equal(classicState.crazyTimerEndsAt, null);
+
+  // Crazy mode stamps crazyTimerEndsAt accurately
+  const startMs = 1_000_000;
+  const crazyState = createInitialGameState(
+    makeConfig({ playerCount: 4, mode: 'crazy', crazyTimerMinutes: 12 }),
+    Math.random,
+    startMs
+  );
+  assert.equal(crazyState.crazyTimerEndsAt, startMs + 12 * 60_000);
+  assert.equal(crazyState.endedByTimer, false);
+
+  // Configure distinct progress levels across 4 players:
+  // - P2: 1 finished token + 1 token in home stretch -> MUST be 1st!
+  // - P0: 0 finished, 1 token at lapProgress 35 -> MUST be 2nd!
+  // - P3: 0 finished, 1 token at lapProgress 20, 2 captures -> MUST beat P1 (same progress, 0 captures) -> 3rd!
+  // - P1: 0 finished, 1 token at lapProgress 20, 0 captures -> MUST be 4th!
+  const geom = buildBoardGeometry(4);
+  const customState: GameState = {
+    ...crazyState,
+    players: crazyState.players.map((p, idx) => {
+      if (idx === 2) {
+        return {
+          ...p,
+          tokens: p.tokens.map((t, ti) =>
+            ti === 0
+              ? { ...t, zone: 'finished' as const, ringIndex: -1, homeIndex: -1, lapProgress: geom.ringLength }
+              : ti === 1
+                ? { ...t, zone: 'home_stretch' as const, ringIndex: -1, homeIndex: 2, lapProgress: geom.ringLength }
+                : t
+          ),
+        };
+      }
+      if (idx === 0) {
+        return {
+          ...p,
+          tokens: p.tokens.map((t, ti) =>
+            ti === 0 ? { ...t, zone: 'track' as const, ringIndex: 35, lapProgress: 35 } : t
+          ),
+        };
+      }
+      if (idx === 3) {
+        return {
+          ...p,
+          captures: 2,
+          tokens: p.tokens.map((t, ti) =>
+            ti === 0 ? { ...t, zone: 'track' as const, ringIndex: 20, lapProgress: 20 } : t
+          ),
+        };
+      }
+      return {
+        ...p,
+        captures: 0,
+        tokens: p.tokens.map((t, ti) =>
+          ti === 0 ? { ...t, zone: 'track' as const, ringIndex: 20, lapProgress: 20 } : t
+        ),
+      };
+    }),
+  };
+
+  // Sanity-check computePlayerProgress ordering
+  const p2Prog = computePlayerProgress(customState, customState.players[2]);
+  const p0Prog = computePlayerProgress(customState, customState.players[0]);
+  const p3Prog = computePlayerProgress(customState, customState.players[3]);
+  const p1Prog = computePlayerProgress(customState, customState.players[1]);
+  assert.equal(p2Prog.finishedCount, 1);
+  assert.ok(p2Prog.totalProgressSteps > p0Prog.totalProgressSteps);
+  assert.ok(p0Prog.totalProgressSteps > p3Prog.totalProgressSteps);
+  assert.equal(p3Prog.totalProgressSteps, p1Prog.totalProgressSteps);
+  assert.ok(p2Prog.progressPct > p0Prog.progressPct && p0Prog.progressPct > p1Prog.progressPct);
+
+  const expired = resolveCrazyTimerExpiration(customState);
+  assert.equal(expired.phase, 'finished');
+  assert.equal(expired.endedByTimer, true);
+  assert.deepEqual(expired.finishedOrder, [2, 0, 3, 1]);
+  assert.equal(expired.players[2].finishedRank, 1);
+  assert.equal(expired.players[0].finishedRank, 2);
+  assert.equal(expired.players[3].finishedRank, 3);
+  assert.equal(expired.players[1].finishedRank, 4);
+  assert.match(expired.lastEvent?.message ?? '', /Time's up/i);
+
+  // Calling resolveCrazyTimerExpiration again is idempotent
+  const secondCall = resolveCrazyTimerExpiration(expired);
+  assert.deepEqual(secondCall.finishedOrder, [2, 0, 3, 1]);
+});
+
 
 
 

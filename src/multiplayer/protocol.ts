@@ -49,6 +49,7 @@ export interface OnlineRoomSnapshot {
   tokensPerPlayer: 2 | 4;
   themeId: ThemeId;
   fillWithBots: boolean;
+  crazyTimerMinutes: number;
   seats: OnlineSeat[];
   createdAt: number;
 }
@@ -74,6 +75,7 @@ export type ClientToServerMessage =
       tokensPerPlayer: 2 | 4;
       themeId: ThemeId;
       fillWithBots?: boolean;
+      crazyTimerMinutes?: number;
     }
   | {
       type: 'room:join';
@@ -92,6 +94,7 @@ export type ClientToServerMessage =
       playerCount?: number;
       tokensPerPlayer?: 2 | 4;
       fillWithBots?: boolean;
+      crazyTimerMinutes?: number;
     }
   | {
       type: 'room:start';
@@ -114,6 +117,13 @@ export type ClientToServerMessage =
       clientId: string;
       targetClientId: string;
       signal: VoiceSignalPayload;
+    }
+  | {
+      type: 'voice:audio';
+      clientId: string;
+      targetClientIds: string[];
+      sampleRate: number;
+      data: string;
     }
   | {
       type: 'ping';
@@ -186,6 +196,12 @@ export type ServerToClientMessage =
       type: 'voice:speaking';
       clientId: string;
       speaking: boolean;
+    }
+  | {
+      type: 'voice:audio';
+      fromClientId: string;
+      sampleRate: number;
+      data: string;
     }
   | {
       type: 'room:error';

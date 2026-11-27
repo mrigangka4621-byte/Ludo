@@ -1,5 +1,5 @@
 import { Check, Play, RotateCcw, Trophy, Volume1, Volume2, VolumeX, X } from 'lucide-react';
-import { formatOrdinal } from '../game/engine';
+import { computePlayerProgress, formatOrdinal } from '../game/engine';
 import { PLAYER_PALETTES, THEME_LIST } from '../game/themes';
 import type { BoardTheme, GameState, ThemeId } from '../game/types';
 import { TeardropPinBadge } from './GameHud';
@@ -8,6 +8,7 @@ interface PauseModalProps {
   theme: BoardTheme;
   volume: number;
   muted: boolean;
+  onlineRoomCode?: string | null;
   onChangeVolume: (volume: number) => void;
   onPreviewVolume: () => void;
   onToggleMute: () => void;
@@ -21,6 +22,7 @@ export function PauseModal({
   theme,
   volume,
   muted,
+  onlineRoomCode = null,
   onChangeVolume,
   onPreviewVolume,
   onToggleMute,
@@ -155,9 +157,30 @@ export function PauseModal({
           </div>
         </div>
 
+        {onlineRoomCode && (
+          <div
+            data-testid="pause-online-room-notice"
+            className="rounded-xl px-3.5 py-2.5 text-xs leading-relaxed"
+            style={{
+              backgroundColor: 'rgba(16, 185, 129, 0.14)',
+              border: '1.5px solid rgba(52, 211, 153, 0.5)',
+              color: theme.textPrimary,
+            }}
+          >
+            <div className="font-extrabold text-emerald-300">
+              Room {onlineRoomCode} stays live
+            </div>
+            <div className="mt-0.5" style={{ color: theme.textSecondary }}>
+              Leaving hands your pawns to CPU — you or any friend can rejoin anytime with code{' '}
+              <span className="font-mono-num font-extrabold text-emerald-200">{onlineRoomCode}</span>.
+            </div>
+          </div>
+        )}
+
         <div className="space-y-2.5 pt-1">
           <button
             type="button"
+            data-testid="pause-resume-btn"
             onClick={onResume}
             className="w-full flex items-center justify-center gap-2 py-3 rounded-xl font-bold text-sm"
             style={{ backgroundColor: theme.accent, color: theme.accentText }}
@@ -180,11 +203,12 @@ export function PauseModal({
           </button>
           <button
             type="button"
+            data-testid="pause-leave-match-btn"
             onClick={onBackToTitle}
             className="w-full py-2.5 rounded-xl font-bold text-sm"
             style={{ color: theme.textSecondary }}
           >
-            Back to Setup
+            {onlineRoomCode ? 'Leave Match (Keep Room Open)' : 'Back to Setup'}
           </button>
         </div>
       </div>
@@ -324,10 +348,10 @@ export function RulesModal({ theme, mode, onClose }: RulesModalProps) {
             <strong style={{ color: theme.textPrimary }}>Safe Stars, Stacks &amp; Captures:</strong> Start squares and Star tiles protect pawns. Stacking 2+ pawns on any track square turns it into a Safe Point until only 1 pawn remains alone. Landing on an unprotected rival knocks them back!
           </li>
           <li>
-            <strong style={{ color: theme.textPrimary }}>Classic &amp; Flip-Track (↔):</strong> Roll a 6 to deploy — guaranteed opening Mercy 6 after <strong>10 misses</strong> at match start. If all your pawns get captured back to Home Yard later, <strong>Comeback Mercy 6</strong> boosts your 6 odds by <strong>+50%</strong> and guarantees a 6 in at most <strong>8 rolls</strong>! In Flip-Track, pick Forward (↻) or Backward (↺) each turn.
+            <strong style={{ color: theme.textPrimary }}>Classic &amp; Flip-Track (↔):</strong> Roll a 6 to deploy — guaranteed opening Mercy 6 after <strong>10 misses</strong> at match start. If all your pawns get captured back to Home Yard later, <strong>Comeback Mercy 6</strong> boosts your 6 odds by <strong>+50%</strong> and guarantees a 6 in at most <strong>5 rolls</strong>! In Flip-Track, pick Forward (↻) or Backward (↺) each turn.
           </li>
           <li>
-            <strong style={{ color: theme.textPrimary }}>Crazy Mode ⚡:</strong> Boosted 6 rolls (limited to <strong>Double Six</strong> — after two 6s you still get your bonus roll, guaranteed 1–5 so it never lands on a 3rd 6!), <strong>Guaranteed Snipe</strong> (if a rival is 1–6 squares ahead on a non-safe tile, your die rolls the exact capture number!), <strong>Revenge 6</strong> after getting captured, and wild <strong>Chaos Star</strong> events (+2 Turbo Boost, Swaparoo, or Free Bonus Roll)!
+            <strong style={{ color: theme.textPrimary }}>Crazy Mode ⚡:</strong> Host-adjustable <strong>10–30 min timer</strong> (if time runs out, <strong>1st, 2nd, 3rd...</strong> are decided by board progress!), boosted 6 rolls (limited to <strong>Double Six</strong> — bonus roll guaranteed 1–5), <strong>Guaranteed Snipe</strong> when a rival is 1–6 steps ahead, <strong>Revenge 6</strong> after getting captured, and wild <strong>Chaos Star</strong> events!
           </li>
           <li>
             <strong style={{ color: theme.textPrimary }}>UNO Ludo Mode 🃏:</strong> No dice! All pawns start ready on Start Squares while Home Yards hold your <strong>6 UNO cards</strong> (auto-refills 6 fresh cards when emptied). Play <strong>1–6</strong> to advance and <strong>capture</strong> unprotected rivals (kicking them back to their Start Square — or <strong>instant -6 squares punishment</strong> if already knocked behind Start — plus a bonus card play!), <strong>Reverse (⇄)</strong> to flip turn order, <strong>Skip (⊘)</strong> to skip the next player, <strong>Swap (🔀)</strong> to trade places, or stackable <strong>-2 / -4</strong> knockback cards (stack -2/-4 on -2, and -4 on -4; never -2 on -4)!
@@ -408,7 +432,7 @@ export function VictoryModal({
           </div>
           <div>
             <div className="text-xs font-bold" style={{ color: theme.accent }}>
-              Match Complete
+              {state.endedByTimer ? "⏱️ Time's Up · Ranked by Progress" : 'Match Complete'}
             </div>
             <h2 id="victory-modal-title" className="font-display font-bold text-3xl leading-tight">
               {winner.name} Wins!
@@ -447,9 +471,11 @@ export function VictoryModal({
           {rankedPlayers.map((player, idx) => {
             const palette = PLAYER_PALETTES[player.paletteIndex];
             const homeCount = player.tokens.filter((t) => t.zone === 'finished').length;
+            const prog = computePlayerProgress(state, player);
             return (
               <li
                 key={player.id}
+                data-testid={`victory-rank-${idx + 1}`}
                 className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg"
                 style={{ backgroundColor: idx === 0 ? theme.panelMutedBg : 'transparent' }}
               >
@@ -464,6 +490,7 @@ export function VictoryModal({
                   <span className="text-sm font-bold truncate">{player.name}</span>
                 </div>
                 <span className="font-mono-num text-xs" style={{ color: theme.textSecondary }}>
+                  {state.endedByTimer ? `${prog.progressPct}% · ` : ''}
                   {homeCount}/{state.config.tokensPerPlayer} Home · {player.captures} cap
                 </span>
               </li>

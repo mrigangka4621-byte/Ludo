@@ -22,6 +22,7 @@ export interface OnlineClientHandlers {
   onGameEvent?: (event: OnlineGameEvent) => void;
   onVoiceSignal?: (payload: { fromClientId: string; signal: VoiceSignalPayload }) => void;
   onVoiceSpeaking?: (payload: { clientId: string; speaking: boolean }) => void;
+  onVoiceAudio?: (payload: { fromClientId: string; sampleRate: number; data: string }) => void;
   onError?: (err: { code: string; message: string }) => void;
 }
 
@@ -48,7 +49,7 @@ function getWebSocketUrl(): string {
 }
 
 /**
- * Lightweight auto-reconnecting WebSocket client for Mango Ludo online room-code matches.
+ * Resilient auto-reconnecting WebSocket client for Mango Ludo online room-code matches & voice chat.
  */
 export class MangoOnlineClient {
   readonly clientId: string;
@@ -61,6 +62,25 @@ export class MangoOnlineClient {
   private shouldReconnect = false;
   private activeRoomCode: string | null = null;
   private activePlayerName = 'Player';
+  private lifecycleListenersAttached = false;
+
+  private readonly handleWindowWake = () => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    if (!this.shouldReconnect || !this.activeRoomCode) return;
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING) {
+      if (this.reconnectTimer !== null) {
+        window.clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.connect();
+    } else if (this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({ type: 'ping' }));
+      } catch {
+        // onclose will reconnect
+      }
+    }
+  };
 
   constructor() {
     this.clientId = getOrCreateClientId();
@@ -70,8 +90,24 @@ export class MangoOnlineClient {
     this.handlers = handlers;
   }
 
+  private attachLifecycleListeners() {
+    if (this.lifecycleListenersAttached || typeof window === 'undefined') return;
+    this.lifecycleListenersAttached = true;
+    window.addEventListener('online', this.handleWindowWake);
+    document.addEventListener('visibilitychange', this.handleWindowWake);
+  }
+
+  private detachLifecycleListeners() {
+    if (!this.lifecycleListenersAttached || typeof window === 'undefined') return;
+    this.lifecycleListenersAttached = false;
+    window.removeEventListener('online', this.handleWindowWake);
+    document.removeEventListener('visibilitychange', this.handleWindowWake);
+  }
+
   connect() {
     this.shouldReconnect = true;
+    this.attachLifecycleListeners();
+
     if (
       this.ws &&
       (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
@@ -84,34 +120,41 @@ export class MangoOnlineClient {
     this.ws = ws;
 
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       this.reconnectAttempts = 0;
       this.handlers.onConnectionChange?.('connected');
 
-      // Rejoin active room automatically if this was a reconnect
-      if (this.activeRoomCode && this.pendingQueue.length === 0) {
-        this.sendRaw({
-          type: 'room:join',
-          clientId: this.clientId,
-          roomCode: this.activeRoomCode,
-          playerName: this.activePlayerName,
-        });
+      // ALWAYS rejoin active room first on reconnect unless the queue already starts with room:create or room:join
+      const firstPending = this.pendingQueue[0];
+      const alreadyJoining =
+        firstPending && (firstPending.type === 'room:create' || firstPending.type === 'room:join');
+      if (this.activeRoomCode && !alreadyJoining) {
+        ws.send(
+          JSON.stringify({
+            type: 'room:join',
+            clientId: this.clientId,
+            roomCode: this.activeRoomCode,
+            playerName: this.activePlayerName,
+          } satisfies ClientToServerMessage)
+        );
       }
 
       // Flush queued messages
-      while (this.pendingQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
+      while (this.pendingQueue.length > 0 && this.ws === ws && ws.readyState === WebSocket.OPEN) {
         const next = this.pendingQueue.shift()!;
         ws.send(JSON.stringify(next));
       }
 
       if (this.heartbeatTimer !== null) window.clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = window.setInterval(() => {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify({ type: 'ping' }));
+        if (this.ws === ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping' }));
         }
-      }, 25_000);
+      }, 18_000);
     };
 
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
       let msg: ServerToClientMessage;
       try {
         msg = JSON.parse(String(ev.data)) as ServerToClientMessage;
@@ -123,6 +166,10 @@ export class MangoOnlineClient {
 
       if (msg.type === 'room:joined') {
         this.activeRoomCode = msg.room.roomCode;
+        const mySeat = msg.room.seats.find((s) => s.seatIndex === msg.mySeatIndex);
+        if (mySeat?.name) {
+          this.activePlayerName = mySeat.name;
+        }
         this.handlers.onRoomJoined?.({
           room: msg.room,
           mySeatIndex: msg.mySeatIndex,
@@ -149,12 +196,20 @@ export class MangoOnlineClient {
           clientId: msg.clientId,
           speaking: msg.speaking,
         });
+      } else if (msg.type === 'voice:audio') {
+        this.handlers.onVoiceAudio?.({
+          fromClientId: msg.fromClientId,
+          sampleRate: msg.sampleRate,
+          data: msg.data,
+        });
       } else if (msg.type === 'room:error') {
         this.handlers.onError?.({ code: msg.code, message: msg.message });
       }
     };
 
     ws.onclose = () => {
+      // CRITICAL: Ignore close events from older/superseded sockets
+      if (this.ws !== ws) return;
       if (this.heartbeatTimer !== null) {
         window.clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = null;
@@ -163,8 +218,9 @@ export class MangoOnlineClient {
       this.handlers.onConnectionChange?.('disconnected');
 
       if (this.shouldReconnect && this.activeRoomCode) {
-        const delay = Math.min(5000, 600 * Math.pow(1.6, this.reconnectAttempts));
+        const delay = Math.min(4000, 500 * Math.pow(1.5, this.reconnectAttempts));
         this.reconnectAttempts += 1;
+        if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
         this.reconnectTimer = window.setTimeout(() => {
           this.reconnectTimer = null;
           this.connect();
@@ -181,6 +237,7 @@ export class MangoOnlineClient {
     this.shouldReconnect = false;
     this.activeRoomCode = null;
     this.pendingQueue = [];
+    this.detachLifecycleListeners();
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -189,9 +246,14 @@ export class MangoOnlineClient {
       window.clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    const prev = this.ws;
+    this.ws = null;
+    if (prev) {
+      try {
+        prev.close();
+      } catch {
+        // ignore
+      }
     }
     this.handlers.onConnectionChange?.('disconnected');
   }
@@ -212,6 +274,7 @@ export class MangoOnlineClient {
     tokensPerPlayer: 2 | 4;
     themeId: ThemeId;
     fillWithBots?: boolean;
+    crazyTimerMinutes?: number;
   }) {
     this.activePlayerName = params.playerName.trim() || 'Player 1';
     this.sendRaw({
@@ -223,15 +286,18 @@ export class MangoOnlineClient {
       tokensPerPlayer: params.tokensPerPlayer,
       themeId: params.themeId,
       fillWithBots: params.fillWithBots ?? true,
+      crazyTimerMinutes: params.crazyTimerMinutes,
     });
   }
 
   joinRoom(roomCode: string, playerName: string) {
-    this.activePlayerName = playerName.trim() || 'Player';
+    const normalized = roomCode.trim().toUpperCase();
+    this.activeRoomCode = normalized;
+    this.activePlayerName = playerName.trim();
     this.sendRaw({
       type: 'room:join',
       clientId: this.clientId,
-      roomCode: roomCode.trim().toUpperCase(),
+      roomCode: normalized,
       playerName: this.activePlayerName,
     });
   }
@@ -239,6 +305,7 @@ export class MangoOnlineClient {
   leaveRoom() {
     const wasActive = Boolean(this.activeRoomCode);
     this.activeRoomCode = null;
+    this.pendingQueue = [];
     if (wasActive && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'room:leave', clientId: this.clientId }));
     }
@@ -249,6 +316,7 @@ export class MangoOnlineClient {
     playerCount?: number;
     tokensPerPlayer?: 2 | 4;
     fillWithBots?: boolean;
+    crazyTimerMinutes?: number;
   }) {
     this.sendRaw({
       type: 'room:update_settings',
@@ -293,6 +361,19 @@ export class MangoOnlineClient {
         clientId: this.clientId,
         targetClientId,
         signal,
+      } satisfies ClientToServerMessage)
+    );
+  }
+
+  sendVoiceAudio(targetClientIds: string[], sampleRate: number, data: string) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || targetClientIds.length === 0) return;
+    this.ws.send(
+      JSON.stringify({
+        type: 'voice:audio',
+        clientId: this.clientId,
+        targetClientIds,
+        sampleRate,
+        data,
       } satisfies ClientToServerMessage)
     );
   }
