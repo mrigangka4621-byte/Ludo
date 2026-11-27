@@ -21,8 +21,11 @@ import type {
   MoveDirection,
   MoveOption,
 } from '../game/types';
+import type { OnlineSeat } from '../multiplayer/protocol';
+import type { VoiceUiSnapshot } from '../multiplayer/voiceChat';
 import { DiceControl } from './DiceControl';
 import { TitleEmblem } from './TitleEmblem';
+import { SeatVoiceBadge, TopBarVoiceControls } from './VoiceIndicators';
 
 /**
  * Reusable glossy teardrop pin icon for the bottom arcade player bar & roster.
@@ -69,6 +72,12 @@ interface TopArcadeBarProps {
   theme: BoardTheme;
   muted: boolean;
   onlineRoomCode?: string | null;
+  voice?: VoiceUiSnapshot;
+  voiceSpeakingCount?: number;
+  onJoinVoice?: () => void;
+  onLeaveVoice?: () => void;
+  onToggleVoiceMute?: () => void;
+  onToggleVoiceDeafen?: () => void;
   onToggleMute: () => void;
   onOpenPause: () => void;
   onOpenThemePicker: () => void;
@@ -81,6 +90,12 @@ export function TopArcadeBar({
   theme,
   muted,
   onlineRoomCode = null,
+  voice,
+  voiceSpeakingCount = 0,
+  onJoinVoice,
+  onLeaveVoice,
+  onToggleVoiceMute,
+  onToggleVoiceDeafen,
   onToggleMute,
   onOpenPause,
   onOpenThemePicker,
@@ -111,6 +126,22 @@ export function TopArcadeBar({
       </div>
 
       <div className="flex items-center gap-1.5 shrink-0">
+        {onlineRoomCode &&
+          voice &&
+          onJoinVoice &&
+          onLeaveVoice &&
+          onToggleVoiceMute &&
+          onToggleVoiceDeafen && (
+            <TopBarVoiceControls
+              theme={theme}
+              voice={voice}
+              speakingCount={voiceSpeakingCount}
+              onJoinVoice={onJoinVoice}
+              onLeaveVoice={onLeaveVoice}
+              onToggleMute={onToggleVoiceMute}
+              onToggleDeafen={onToggleVoiceDeafen}
+            />
+          )}
         {onToggleMobileRoster && (
           <button
             type="button"
@@ -442,6 +473,7 @@ interface PlayerStandingsPanelProps {
   theme: BoardTheme;
   localSeatIndex?: number | null;
   onlineRoomCode?: string | null;
+  onlineSeats?: OnlineSeat[];
   onCloseMobile?: () => void;
 }
 
@@ -453,6 +485,7 @@ export function PlayerStandingsPanel({
   theme,
   localSeatIndex = null,
   onlineRoomCode = null,
+  onlineSeats,
   onCloseMobile,
 }: PlayerStandingsPanelProps) {
   const isArcade = theme.id === 'arcade';
@@ -535,14 +568,26 @@ export function PlayerStandingsPanel({
           const unoCardCount = state.unoState?.hands?.[player.id]?.length ?? 0;
 
           const glowPrimary = isOnFire || hasRevengeCharge ? '#F97316' : palette.color;
+          const onlineSeat = onlineSeats?.find((s) => s.seatIndex === idx);
+          const isVoiceSpeaking = Boolean(
+            onlineSeat?.connected &&
+              onlineSeat?.voiceJoined &&
+              !onlineSeat?.voiceMuted &&
+              onlineSeat?.voiceSpeaking
+          );
 
           return (
             <li
               key={player.id}
               data-testid={isCurrent ? `active-standing-player-${player.id}` : `standing-player-${player.id}`}
               data-active-turn={isCurrent ? 'true' : 'false'}
+              data-voice-speaking={isVoiceSpeaking ? 'true' : 'false'}
               className={`transition-all duration-300 ease-out ${
-                isCurrent ? 'active-roster-card scale-[1.025] z-10' : 'rounded-xl scale-100 opacity-85 hover:opacity-100'
+                isCurrent
+                  ? 'active-roster-card scale-[1.025] z-10'
+                  : `rounded-xl scale-100 opacity-85 hover:opacity-100 ${
+                      isVoiceSpeaking ? 'animate-voice-speak-glow opacity-100' : ''
+                    }`
               }`}
               style={
                 isCurrent
@@ -552,9 +597,15 @@ export function PlayerStandingsPanel({
                       '--player-glow-strong': `${glowPrimary}DD`,
                     } as React.CSSProperties)
                   : {
-                      backgroundColor: 'rgba(0,0,0,0.14)',
+                      backgroundColor: isVoiceSpeaking
+                        ? 'rgba(34, 197, 94, 0.14)'
+                        : 'rgba(0,0,0,0.14)',
                       border: `1.5px solid ${
-                        isOnFire || hasRevengeCharge ? '#F97316' : 'rgba(255,255,255,0.06)'
+                        isVoiceSpeaking
+                          ? '#4ADE80'
+                          : isOnFire || hasRevengeCharge
+                            ? '#F97316'
+                            : 'rgba(255,255,255,0.06)'
                       }`,
                     }
               }
@@ -615,19 +666,6 @@ export function PlayerStandingsPanel({
                       }
                     >
                       <span className="truncate">{player.name}</span>
-                      {isCurrent && (
-                        <span
-                          className="px-1.5 py-0.5 rounded-full font-display font-black text-[9px] uppercase tracking-wider shrink-0 shadow-sm"
-                          data-testid={`active-turn-pill-p${player.id}`}
-                          style={{
-                            backgroundColor: '#FDE047',
-                            color: '#0B1C3D',
-                            boxShadow: '0 0 8px rgba(253, 224, 71, 0.75)',
-                          }}
-                        >
-                          ▶ TURN
-                        </span>
-                      )}
                       {isOnFire && (
                         <span
                           className="text-[11px] font-extrabold text-amber-300 shrink-0"
@@ -667,6 +705,19 @@ export function PlayerStandingsPanel({
                       className="text-[11px] font-semibold leading-tight mt-0.5 flex items-center gap-1 flex-wrap"
                       style={{ color: isCurrent ? '#FEF9C3' : theme.textMuted }}
                     >
+                      {isCurrent && (
+                        <span
+                          className="px-1.5 py-0.5 rounded-full font-display font-black text-[9px] uppercase tracking-wider shrink-0 shadow-sm"
+                          data-testid={`active-turn-pill-p${player.id}`}
+                          style={{
+                            backgroundColor: '#FDE047',
+                            color: '#0B1C3D',
+                            boxShadow: '0 0 8px rgba(253, 224, 71, 0.75)',
+                          }}
+                        >
+                          ▶ TURN
+                        </span>
+                      )}
                       {player.finishedRank !== null ? (
                         `${formatOrdinal(player.finishedRank)} place`
                       ) : state.config.mode === 'uno' ? (
@@ -704,7 +755,15 @@ export function PlayerStandingsPanel({
                   </div>
                 </div>
 
-                <div className="relative z-10 flex items-center gap-2 shrink-0">
+                <div className="relative z-10 flex items-center gap-1.5 shrink-0">
+                  {onlineSeat && (
+                    <SeatVoiceBadge
+                      voiceJoined={onlineSeat.voiceJoined}
+                      voiceMuted={onlineSeat.voiceMuted}
+                      voiceSpeaking={onlineSeat.voiceSpeaking}
+                      testIdPrefix={`standings-voice-p${player.id}`}
+                    />
+                  )}
                   <div className="flex items-center gap-1" aria-hidden="true">
                     {player.tokens.map((tok) => (
                       <span

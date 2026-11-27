@@ -169,6 +169,9 @@ export class RoomManager {
       connected: true,
       isHost: true,
       paletteIndex: createDefaultPlayers(playerCount)[0].paletteIndex,
+      voiceJoined: false,
+      voiceMuted: false,
+      voiceSpeaking: false,
     };
 
     const room: ManagedRoom = {
@@ -246,6 +249,9 @@ export class RoomManager {
       connected: true,
       isHost: false,
       paletteIndex: defaults[nextSeatIndex]?.paletteIndex ?? nextSeatIndex % 10,
+      voiceJoined: false,
+      voiceMuted: false,
+      voiceSpeaking: false,
     });
     room.seats = assignPaletteIndices(room.seats, room.playerCount);
     room.lastActivityAt = Date.now();
@@ -260,8 +266,57 @@ export class RoomManager {
     const seat = room.seats.find((s) => s.clientId === clientId);
     if (seat) {
       seat.connected = false;
+      seat.voiceJoined = false;
+      seat.voiceMuted = false;
+      seat.voiceSpeaking = false;
       room.lastActivityAt = Date.now();
     }
+    return room;
+  }
+
+  updateVoiceState(
+    clientId: string,
+    patch: { joined: boolean; muted: boolean; speaking?: boolean }
+  ): {
+    room: ManagedRoom;
+    fullChanged: boolean;
+    speakingChanged: boolean;
+    speaking: boolean;
+  } | null {
+    const room = this.getRoomByClientId(clientId);
+    if (!room) return null;
+    const seat = room.seats.find((s) => s.clientId === clientId);
+    if (!seat) return null;
+
+    const nextJoined = Boolean(patch.joined);
+    const nextMuted = nextJoined ? Boolean(patch.muted) : false;
+    const nextSpeaking = nextJoined && !nextMuted ? Boolean(patch.speaking) : false;
+
+    const fullChanged =
+      Boolean(seat.voiceJoined) !== nextJoined || Boolean(seat.voiceMuted) !== nextMuted;
+    const speakingChanged = Boolean(seat.voiceSpeaking) !== nextSpeaking;
+
+    seat.voiceJoined = nextJoined;
+    seat.voiceMuted = nextMuted;
+    seat.voiceSpeaking = nextSpeaking;
+    room.lastActivityAt = Date.now();
+
+    return {
+      room,
+      fullChanged,
+      speakingChanged,
+      speaking: nextSpeaking,
+    };
+  }
+
+  canRelayVoiceSignal(fromClientId: string, targetClientId: string): ManagedRoom | null {
+    if (!fromClientId || !targetClientId || fromClientId === targetClientId) return null;
+    const room = this.getRoomByClientId(fromClientId);
+    if (!room) return null;
+    const fromSeat = room.seats.find((s) => s.clientId === fromClientId && s.connected);
+    const targetSeat = room.seats.find((s) => s.clientId === targetClientId && s.connected);
+    if (!fromSeat || !targetSeat) return null;
+    room.lastActivityAt = Date.now();
     return room;
   }
 
@@ -293,6 +348,9 @@ export class RoomManager {
 
     // During a live match: mark seat disconnected & hand it over to CPU bot so others never get stuck!
     room.seats[idx].connected = false;
+    room.seats[idx].voiceJoined = false;
+    room.seats[idx].voiceMuted = false;
+    room.seats[idx].voiceSpeaking = false;
     if (room.gameState && room.gameState.players[idx]) {
       room.gameState = {
         ...room.gameState,
@@ -630,7 +688,7 @@ export class RoomManager {
             ...nextState,
             lastEvent: {
               ...nextState.lastEvent,
-              message: `⚡ DOUBLE SIX (2×6)! Final six this turn for ${roller.name} — pick your move!`,
+              message: `⚡ DOUBLE SIX (2×6)! Pick your move, then roll your bonus turn (1–5 only)!`,
               kind: 'bonus',
             },
           };

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { ArrowLeft, Crown, KeyRound, Play, Plus } from 'lucide-react';
+import { ArrowLeft, Crown, KeyRound, Play } from 'lucide-react';
 import { soundFx } from '../game/sound';
 import { BOARD_THEMES, THEME_LIST } from '../game/themes';
 import type { GameConfig, GameMode, ThemeId } from '../game/types';
@@ -466,50 +466,35 @@ export function HomeScreen({
                 border: '3px solid #FACC15',
               }}
             >
-              {/* Create Room / Join Room Segmented Toggle */}
+              {/* Dedicated Single-Purpose Heading (Play Online = Create only; Play With Friends = Join only) */}
               <div
-                className="grid grid-cols-2 gap-1.5 p-1 rounded-xl"
+                className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl"
                 style={{
                   backgroundColor: 'rgba(5, 16, 46, 0.65)',
-                  border: '1.5px solid rgba(250, 204, 21, 0.35)',
+                  border: '1.5px solid rgba(250, 204, 21, 0.45)',
                 }}
               >
-                <button
-                  type="button"
-                  data-testid="mp-tab-create"
-                  aria-pressed={mpTab === 'create'}
-                  onClick={() => {
-                    soundFx.playButtonClick();
-                    onClearOnlineError();
-                    setMpTab('create');
-                  }}
-                  className="flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs sm:text-sm font-extrabold whitespace-nowrap transition-all"
-                  style={{
-                    backgroundColor: mpTab === 'create' ? '#FACC15' : 'transparent',
-                    color: mpTab === 'create' ? '#0B1C3D' : '#CBD5E1',
-                  }}
-                >
-                  <Plus size={15} />
-                  <span>Create Room</span>
-                </button>
-                <button
-                  type="button"
-                  data-testid="mp-tab-join"
-                  aria-pressed={mpTab === 'join'}
-                  onClick={() => {
-                    soundFx.playButtonClick();
-                    onClearOnlineError();
-                    setMpTab('join');
-                  }}
-                  className="flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs sm:text-sm font-extrabold whitespace-nowrap transition-all"
-                  style={{
-                    backgroundColor: mpTab === 'join' ? '#FACC15' : 'transparent',
-                    color: mpTab === 'join' ? '#0B1C3D' : '#CBD5E1',
-                  }}
-                >
-                  <KeyRound size={15} />
-                  <span>Join Room</span>
-                </button>
+                {mpTab === 'create' ? (
+                  <>
+                    <Crown size={16} className="text-yellow-300 shrink-0" />
+                    <h2
+                      data-testid="mp-create-heading"
+                      className="font-display font-bold text-base sm:text-lg tracking-wide text-yellow-300 uppercase"
+                    >
+                      Play Online · Create Room
+                    </h2>
+                  </>
+                ) : (
+                  <>
+                    <KeyRound size={16} className="text-yellow-300 shrink-0" />
+                    <h2
+                      data-testid="mp-join-heading"
+                      className="font-display font-bold text-base sm:text-lg tracking-wide text-yellow-300 uppercase"
+                    >
+                      Play With Friends · Join Room
+                    </h2>
+                  </>
+                )}
               </div>
 
               {/* Display Name */}

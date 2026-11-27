@@ -721,7 +721,9 @@ export function commitUnoNumberMove(
   const eventMessage = core.playerJustFinished
     ? core.nextState.lastEvent?.message ?? ''
     : didCapture
-      ? `${activePlayer.name} captured ${core.capturedNames.join(' & ')}! Bonus card play!${refillSuffix}`
+      ? core.unoBackwardPenaltyApplied
+        ? `💥 ${activePlayer.name} captured ${core.capturedNames.join(' & ')} behind Start — instant -6 squares punishment! Bonus card play!${refillSuffix}`
+        : `${activePlayer.name} captured ${core.capturedNames.join(' & ')}! Bonus card play!${refillSuffix}`
       : didFinish
         ? `${activePlayer.name} scored a pawn home! Bonus card play!${refillSuffix}`
         : `${activePlayer.name} played ${state.diceValue}. ${core.nextState.players[nextPlayerIndex].name}'s turn.${refillSuffix}`;

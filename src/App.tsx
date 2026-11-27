@@ -66,6 +66,7 @@ import { SetupScreen } from './components/SetupScreen';
 import { UnoDock } from './components/UnoDock';
 import { VictoryCelebrationCanvas } from './components/VictoryCelebrationCanvas';
 import type { OnlineGameEvent, OnlineRoomSnapshot } from './multiplayer/protocol';
+import { RoomVoiceManager, type VoiceUiSnapshot } from './multiplayer/voiceChat';
 import { type ConnectionStatus, MangoOnlineClient } from './multiplayer/wsClient';
 
 const STORAGE_KEY_MATCH = 'decaludo_saved_match_v2';
@@ -240,17 +241,30 @@ export default function App() {
 
   // Online Room-Code Multiplayer state (in-memory WebSocket server, no database)
   const onlineClientRef = useRef<MangoOnlineClient | null>(null);
+  const voiceManagerRef = useRef<RoomVoiceManager | null>(null);
   const [onlineRoom, setOnlineRoom] = useState<OnlineRoomSnapshot | null>(null);
   const [mySeatIndex, setMySeatIndex] = useState<number | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [onlineError, setOnlineError] = useState<string | null>(null);
   const [connectingOnline, setConnectingOnline] = useState(false);
+  const [voiceUi, setVoiceUi] = useState<VoiceUiSnapshot>({
+    joined: false,
+    joining: false,
+    muted: false,
+    deafened: false,
+    localSpeaking: false,
+    error: null,
+    activePeerCount: 0,
+  });
+  const [remoteSpeakingLocal, setRemoteSpeakingLocal] = useState<Record<string, boolean>>({});
 
   const isOnlineMatch = Boolean(onlineRoom && mySeatIndex !== null);
   const isOnlineMatchRef = useRef(isOnlineMatch);
   isOnlineMatchRef.current = isOnlineMatch;
   const mySeatIndexRef = useRef(mySeatIndex);
   mySeatIndexRef.current = mySeatIndex;
+  const onlineRoomRef = useRef(onlineRoom);
+  onlineRoomRef.current = onlineRoom;
 
   const canControlTurn = useMemo(() => {
     if (!isOnlineMatch || mySeatIndex === null) return true;
@@ -1042,7 +1056,7 @@ export default function App() {
             ...nextStateWithDirector,
             lastEvent: {
               ...nextStateWithDirector.lastEvent,
-              message: `⚡ DOUBLE SIX (2×6)! Final six this turn for ${roller.name} — pick your move!`,
+              message: `⚡ DOUBLE SIX (2×6)! Pick your move, then roll your bonus turn (1–5 only)!`,
               kind: 'bonus',
             },
           };
@@ -1473,6 +1487,24 @@ export default function App() {
     const client = new MangoOnlineClient();
     onlineClientRef.current = client;
 
+    const voiceMgr = new RoomVoiceManager(client.clientId, {
+      sendVoiceState: (joined, isMuted, speaking) => {
+        client.sendVoiceState(joined, isMuted, speaking);
+      },
+      sendVoiceSignal: (targetClientId, signal) => {
+        client.sendVoiceSignal(targetClientId, signal);
+      },
+      onSnapshot: (snap) => {
+        setVoiceUi(snap);
+      },
+      onPeerSpeakingLocalDetect: (peerClientId, speaking) => {
+        setRemoteSpeakingLocal((prev) =>
+          prev[peerClientId] === speaking ? prev : { ...prev, [peerClientId]: speaking }
+        );
+      },
+    });
+    voiceManagerRef.current = voiceMgr;
+
     client.setHandlers({
       onConnectionChange: (status) => {
         setConnectionStatus(status);
@@ -1482,6 +1514,7 @@ export default function App() {
         setOnlineError(null);
         setOnlineRoom(room);
         setMySeatIndex(seatIdx);
+        voiceMgr.syncPeers(room.seats);
         if (room.status === 'playing' && syncedState) {
           setGameState(syncedState);
           const ended = syncedState.phase === 'finished';
@@ -1495,10 +1528,13 @@ export default function App() {
       },
       onRoomUpdate: (room) => {
         setOnlineRoom(room);
+        voiceMgr.syncPeers(room.seats);
       },
       onRoomStarted: ({ room, gameState: freshState }) => {
         clearPendingTimers();
         setOnlineRoom(room);
+        voiceMgr.clearError();
+        voiceMgr.syncPeers(room.seats);
         setGameState(freshState);
         setMatchEnded(false);
         setCelebrationWinner(null);
@@ -1511,6 +1547,20 @@ export default function App() {
       onGameEvent: (event) => {
         onlineEventRef.current(event);
       },
+      onVoiceSignal: ({ fromClientId, signal }) => {
+        void voiceMgr.handleSignal(fromClientId, signal);
+      },
+      onVoiceSpeaking: ({ clientId, speaking }) => {
+        setOnlineRoom((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            seats: prev.seats.map((seat) =>
+              seat.clientId === clientId ? { ...seat, voiceSpeaking: speaking } : seat
+            ),
+          };
+        });
+      },
       onError: ({ message }) => {
         setConnectingOnline(false);
         setOnlineError(message);
@@ -1518,6 +1568,8 @@ export default function App() {
     });
 
     return () => {
+      voiceMgr.leaveVoice(false);
+      voiceManagerRef.current = null;
       client.leaveRoom();
       client.disconnect();
     };
@@ -1641,10 +1693,33 @@ export default function App() {
     };
   }, [canControlTurn, gameState, handleSelectMove, screen]);
 
+  const handleJoinVoice = useCallback(() => {
+    soundFx.playButtonClick();
+    void voiceManagerRef.current?.joinVoice(onlineRoomRef.current?.seats ?? []);
+  }, []);
+
+  const handleLeaveVoice = useCallback(() => {
+    soundFx.playButtonClick();
+    voiceManagerRef.current?.leaveVoice(true);
+    setRemoteSpeakingLocal({});
+  }, []);
+
+  const handleToggleVoiceMute = useCallback(() => {
+    soundFx.playButtonClick();
+    voiceManagerRef.current?.toggleMute();
+  }, []);
+
+  const handleToggleVoiceDeafen = useCallback(() => {
+    soundFx.playButtonClick();
+    voiceManagerRef.current?.toggleDeafen();
+  }, []);
+
   const handleLeaveToHome = useCallback(() => {
     clearPendingTimers();
     setMatchEnded(false);
     setCelebrationWinner(null);
+    voiceManagerRef.current?.leaveVoice(true);
+    setRemoteSpeakingLocal({});
     if (isOnlineMatchRef.current || onlineRoom) {
       onlineClientRef.current?.leaveRoom();
       setOnlineRoom(null);
@@ -1874,6 +1949,40 @@ export default function App() {
     showThemeModal,
   ]);
 
+  const myClientId = onlineClientRef.current?.clientId ?? '';
+
+  const effectiveOnlineRoom = useMemo(() => {
+    if (!onlineRoom) return null;
+    return {
+      ...onlineRoom,
+      seats: onlineRoom.seats.map((seat) => {
+        if (seat.clientId === myClientId) {
+          return {
+            ...seat,
+            voiceJoined: voiceUi.joined,
+            voiceMuted: voiceUi.muted,
+            voiceSpeaking: voiceUi.joined && !voiceUi.muted && voiceUi.localSpeaking,
+          };
+        }
+        const localDetectSpeaking = Boolean(remoteSpeakingLocal[seat.clientId]);
+        return {
+          ...seat,
+          voiceSpeaking:
+            Boolean(seat.voiceJoined) &&
+            !seat.voiceMuted &&
+            (Boolean(seat.voiceSpeaking) || localDetectSpeaking),
+        };
+      }),
+    };
+  }, [myClientId, onlineRoom, remoteSpeakingLocal, voiceUi.joined, voiceUi.localSpeaking, voiceUi.muted]);
+
+  const voiceSpeakingCount = useMemo(() => {
+    if (!effectiveOnlineRoom) return 0;
+    return effectiveOnlineRoom.seats.filter(
+      (s) => s.connected && s.voiceJoined && !s.voiceMuted && s.voiceSpeaking
+    ).length;
+  }, [effectiveOnlineRoom]);
+
   if (screen === 'home') {
     return (
       <HomeScreen
@@ -1893,15 +2002,20 @@ export default function App() {
     );
   }
 
-  if (screen === 'lobby' && onlineRoom && mySeatIndex !== null) {
+  if (screen === 'lobby' && effectiveOnlineRoom && mySeatIndex !== null) {
     return (
       <OnlineLobbyScreen
-        room={onlineRoom}
+        room={effectiveOnlineRoom}
         mySeatIndex={mySeatIndex}
-        myClientId={onlineClientRef.current?.clientId ?? ''}
+        myClientId={myClientId}
         themeId={config.themeId}
         connectionStatus={connectionStatus}
         error={onlineError}
+        voice={voiceUi}
+        onJoinVoice={handleJoinVoice}
+        onLeaveVoice={handleLeaveVoice}
+        onToggleVoiceMute={handleToggleVoiceMute}
+        onToggleVoiceDeafen={handleToggleVoiceDeafen}
         onUpdateSettings={(patch) => onlineClientRef.current?.updateSettings(patch)}
         onStartMatch={() => onlineClientRef.current?.startMatch()}
         onLeaveRoom={handleLeaveToHome}
@@ -1955,13 +2069,43 @@ export default function App() {
           state={gameState}
           theme={theme}
           muted={muted}
-          onlineRoomCode={onlineRoom?.roomCode ?? null}
+          onlineRoomCode={effectiveOnlineRoom?.roomCode ?? null}
+          voice={isOnlineMatch ? voiceUi : undefined}
+          voiceSpeakingCount={voiceSpeakingCount}
+          onJoinVoice={isOnlineMatch ? handleJoinVoice : undefined}
+          onLeaveVoice={isOnlineMatch ? handleLeaveVoice : undefined}
+          onToggleVoiceMute={isOnlineMatch ? handleToggleVoiceMute : undefined}
+          onToggleVoiceDeafen={isOnlineMatch ? handleToggleVoiceDeafen : undefined}
           onToggleMute={handleToggleMute}
           onOpenPause={() => setScreen('paused')}
           onOpenThemePicker={() => setShowThemeModal(true)}
           onOpenRules={() => setShowRulesModal(true)}
           onToggleMobileRoster={() => setShowMobileRoster(true)}
         />
+
+        {isOnlineMatch && voiceUi.error && (
+          <div className="px-3 sm:px-5 pt-1 shrink-0">
+            <div
+              role="alert"
+              data-testid="match-voice-error-banner"
+              className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm"
+              style={{
+                backgroundColor: 'rgba(153, 27, 27, 0.92)',
+                border: '1px solid rgba(248, 113, 113, 0.7)',
+                color: '#FEE2E2',
+              }}
+            >
+              <span>{voiceUi.error}</span>
+              <button
+                type="button"
+                onClick={() => voiceManagerRef.current?.clearError()}
+                className="px-2 py-0.5 rounded text-[11px] font-extrabold bg-black/25 hover:bg-black/40"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Board Viewport with Direction Flip Toast Overlay */}
         <main className="relative flex-1 flex items-center justify-center px-1 sm:px-5 py-1.5 min-h-0 overflow-hidden">
@@ -2046,7 +2190,8 @@ export default function App() {
           state={gameState}
           theme={theme}
           localSeatIndex={isOnlineMatch ? mySeatIndex : null}
-          onlineRoomCode={onlineRoom?.roomCode ?? null}
+          onlineRoomCode={effectiveOnlineRoom?.roomCode ?? null}
+          onlineSeats={effectiveOnlineRoom?.seats}
         />
       </div>
 
@@ -2062,7 +2207,8 @@ export default function App() {
               state={gameState}
               theme={theme}
               localSeatIndex={isOnlineMatch ? mySeatIndex : null}
-              onlineRoomCode={onlineRoom?.roomCode ?? null}
+              onlineRoomCode={effectiveOnlineRoom?.roomCode ?? null}
+              onlineSeats={effectiveOnlineRoom?.seats}
               onCloseMobile={() => setShowMobileRoster(false)}
             />
           </div>

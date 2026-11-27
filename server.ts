@@ -215,6 +215,40 @@ async function startServer() {
         return;
       }
 
+      if (msg.type === 'voice:state') {
+        const res = roomManager.updateVoiceState(msg.clientId, {
+          joined: msg.joined,
+          muted: msg.muted,
+          speaking: msg.speaking,
+        });
+        if (!res) return;
+        if (res.fullChanged) {
+          broadcastToRoom(res.room, {
+            type: 'room:update',
+            room: snapshotRoom(res.room),
+          });
+        } else if (res.speakingChanged) {
+          broadcastToRoom(res.room, {
+            type: 'voice:speaking',
+            clientId: msg.clientId,
+            speaking: res.speaking,
+          });
+        }
+        return;
+      }
+
+      if (msg.type === 'voice:signal') {
+        const room = roomManager.canRelayVoiceSignal(msg.clientId, msg.targetClientId);
+        if (!room) return;
+        const targetWs = clientSockets.get(msg.targetClientId);
+        sendToClient(targetWs, {
+          type: 'voice:signal',
+          fromClientId: msg.clientId,
+          signal: msg.signal,
+        });
+        return;
+      }
+
       if (msg.type === 'game:action') {
         const res = roomManager.applyGameAction(msg.clientId, msg.action);
         if (!res.ok) {
@@ -263,7 +297,12 @@ async function startServer() {
   if (!IS_PROD) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        ws: { server },
+        watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

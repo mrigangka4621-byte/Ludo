@@ -400,6 +400,17 @@ export function buildCaptureReturnPath(
   const normalizedStart = ((capturedRingIndex % ringLength) + ringLength) % ringLength;
   const waypoints: Point2D[] = [trackCells[normalizedStart].center];
 
+  // In UNO mode (stopAtStart), a pawn already knocked behind its Start Square (lapProgress < 0)
+  // suffers an instant -6 squares backwards punishment instead of advancing forward to Start!
+  if (stopAtStart && lapProgress < 0) {
+    let cur = normalizedStart;
+    for (let step = 0; step < 6; step++) {
+      cur = (cur - 1 + ringLength) % ringLength;
+      waypoints.push(trackCells[cur].center);
+    }
+    return waypoints;
+  }
+
   // Walk opposite the direction the token traveled to reach this square:
   // forward progress (> 0) crawls counter-clockwise (-1) back to Start;
   // backward progress (< 0) crawls clockwise (+1) back to Start.

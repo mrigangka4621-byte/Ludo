@@ -807,7 +807,8 @@ test('Crazy Mode guarantees exact capture roll when rival is 1-6 steps ahead, bo
   assert.equal(afterFirstSix.nextState.activePlayerIndex, 0);
   assert.equal(afterFirstSix.nextState.consecutiveSixes, 1);
 
-  // 2nd six -> legal move, hits Double Six cap -> NO 3rd bonus roll from the 6 (turn passes!)
+  // 2nd six -> legal move, STILL grants bonus roll to the same player (consecutiveSixes = 2),
+  // and the follow-up roll is strictly prevented from landing on 6 (always 1..5)!
   const secondSixRoll = applyDiceRoll(afterFirstSix.nextState, 6);
   assert.equal(secondSixRoll.forfeited, false);
   assert.equal(secondSixRoll.nextState.consecutiveSixes, 2);
@@ -816,17 +817,42 @@ test('Crazy Mode guarantees exact capture roll when rival is 1-6 steps ahead, bo
   );
   assert.ok(deployMove2);
   const afterSecondSix = commitMove(secondSixRoll.nextState, deployMove2);
-  assert.equal(afterSecondSix.bonusTurn, false);
-  assert.equal(afterSecondSix.nextState.activePlayerIndex, 1);
-  assert.equal(afterSecondSix.nextState.consecutiveSixes, 0);
+  assert.equal(afterSecondSix.bonusTurn, true);
+  assert.equal(afterSecondSix.nextState.activePlayerIndex, 0);
+  assert.equal(afterSecondSix.nextState.consecutiveSixes, 2);
 
-  // If a player at consecutiveSixes=2 ever rolls again in Crazy Mode, rollSmartDie never rolls 6 and applyDiceRoll forfeits a 3rd 6!
-  const atDoubleSix: GameState = { ...afterCap, activePlayerIndex: 0, consecutiveSixes: 2 };
-  for (const rVal of [0.01, 0.2, 0.5, 0.85, 0.99]) {
-    const smartAtCap = rollSmartDie(atDoubleSix, () => rVal);
-    assert.notEqual(smartAtCap.rolledValue, 6);
+  // Follow-up bonus roll after Double 6: rollSmartDie must NEVER land on 6 (always 1..5),
+  // even across edge rng values (0..0.9999999) or when Revenge 6 is armed!
+  const withRevengeAtDoubleSix: GameState = {
+    ...afterSecondSix.nextState,
+    crazyRevengeCharges: { ...(afterSecondSix.nextState.crazyRevengeCharges ?? {}), 0: true },
+  };
+  for (const rVal of [0, 0.01, 0.2, 0.5, 0.85, 0.99, 0.9999999]) {
+    const smartAtCap = rollSmartDie(withRevengeAtDoubleSix, () => rVal);
+    assert.ok(
+      smartAtCap.rolledValue >= 1 && smartAtCap.rolledValue <= 5,
+      `Expected 1..5 after Double 6, got ${smartAtCap.rolledValue}`
+    );
   }
-  const thirdSix = applyDiceRoll(atDoubleSix, 6);
+
+  // Rolling that 1..5 follow-up lets Player 0 move and then cleanly finishes their turn
+  const followUpSmart = rollSmartDie(afterSecondSix.nextState, () => 0.99);
+  assert.ok(followUpSmart.rolledValue >= 1 && followUpSmart.rolledValue <= 5);
+  const followUpRoll = applyDiceRoll(afterSecondSix.nextState, followUpSmart.rolledValue);
+  assert.equal(followUpRoll.forfeited, false);
+  assert.equal(followUpRoll.nextState.consecutiveSixes, 0);
+  const followUpMove = getLegalMovesForDirection(
+    followUpRoll.nextState,
+    0,
+    followUpSmart.rolledValue,
+    'forward'
+  )[0];
+  assert.ok(followUpMove);
+  const afterFollowUp = commitMove(followUpRoll.nextState, followUpMove);
+  assert.equal(afterFollowUp.nextState.activePlayerIndex, 1);
+
+  // Guard: if applyDiceRoll ever receives a forced 3rd six directly, it still forfeits cleanly
+  const thirdSix = applyDiceRoll(afterSecondSix.nextState, 6);
   assert.equal(thirdSix.forfeited, true);
   assert.equal(thirdSix.nextState.activePlayerIndex, 1);
 
@@ -1142,6 +1168,88 @@ test('UNO Mode captures detect capturing cards, kick rival back to Start Square,
   assert.equal(victimPawn.zone, 'track');
   assert.equal(victimPawn.ringIndex, p1Start);
   assert.equal(victimPawn.lapProgress, 0);
+});
+
+test('UNO Mode capture on a rival knocked backwards behind Start Square applies instant -6 squares punishment instead of returning forward to Start', () => {
+  const geom = buildBoardGeometry(4);
+  let state = createInitialGameState(makeConfig({ playerCount: 4, mode: 'uno' }));
+
+  const p1Start = geom.startIndices[state.players[1].armIndex];
+  // P1 pawn was pushed -4 squares behind P1's Start Square (ensure non-safe square)
+  let backSteps = 4;
+  let victimRing = ((p1Start - backSteps) % geom.ringLength + geom.ringLength) % geom.ringLength;
+  while (geom.safeIndices.has(victimRing)) {
+    backSteps += 1;
+    victimRing = ((p1Start - backSteps) % geom.ringLength + geom.ringLength) % geom.ringLength;
+  }
+  const hunterRing = ((victimRing - 3) % geom.ringLength + geom.ringLength) % geom.ringLength;
+  const expectedPenalizedRing = ((victimRing - 6) % geom.ringLength + geom.ringLength) % geom.ringLength;
+
+  const card3: UnoCard = { id: 'uno-back-cap-3', kind: 'number', value: 3, color: 'red' };
+  const extraCard: UnoCard = { id: 'uno-back-extra', kind: 'number', value: 2, color: 'green' };
+
+  state = {
+    ...state,
+    activePlayerIndex: 0,
+    phase: 'choosing_card',
+    players: state.players.map((p, idx) => {
+      if (idx === 0) {
+        return {
+          ...p,
+          tokens: p.tokens.map((t, ti) =>
+            ti === 0 ? { ...t, zone: 'track', ringIndex: hunterRing, lapProgress: 10 } : t
+          ),
+        };
+      }
+      if (idx === 1) {
+        return {
+          ...p,
+          tokens: p.tokens.map((t, ti) =>
+            ti === 0 ? { ...t, zone: 'track', ringIndex: victimRing, lapProgress: -backSteps } : t
+          ),
+        };
+      }
+      return p;
+    }),
+    unoState: {
+      ...state.unoState!,
+      hands: {
+        ...state.unoState!.hands,
+        0: [card3, extraCard],
+      },
+    },
+  };
+
+  assert.equal(doesUnoCardCapture(state, 0, card3), true);
+  const selected = selectUnoNumberCard(state, card3.id);
+  const captureMove = getLegalMovesForDirection(selected, 0, 3, 'forward').find((m) =>
+    m.capturesTokenIds.includes('p1-t0')
+  );
+  assert.ok(captureMove);
+
+  const committed = commitUnoNumberMove(selected, captureMove);
+  const victimPawn = committed.nextState.players[1].tokens[0];
+  // Must move -6 MORE squares backwards instead of advancing forward to Start (lapProgress 0)!
+  assert.equal(victimPawn.zone, 'track');
+  assert.equal(victimPawn.ringIndex, expectedPenalizedRing);
+  assert.equal(victimPawn.lapProgress, -(backSteps + 6));
+  assert.equal(committed.bonusTurn, true);
+  assert.equal(committed.nextState.activePlayerIndex, 0);
+  assert.equal(committed.nextState.players[0].captures, 1);
+  assert.match(committed.nextState.lastEvent?.message ?? '', /-6 squares punishment/i);
+
+  // Capture crawl animation path must trace 6 squares counter-clockwise backwards to expectedPenalizedRing
+  const animPath = buildCaptureReturnPath(
+    geom,
+    state.players[1].armIndex,
+    0,
+    victimRing,
+    -backSteps,
+    true
+  );
+  assert.equal(animPath.length, 7);
+  assert.deepEqual(animPath[0], geom.trackCells[victimRing].center);
+  assert.deepEqual(animPath[animPath.length - 1], geom.trackCells[expectedPenalizedRing].center);
 });
 
 

@@ -16,7 +16,29 @@ export interface OnlineSeat {
   connected: boolean;
   isHost: boolean;
   paletteIndex: number;
+  voiceJoined?: boolean;
+  voiceMuted?: boolean;
+  voiceSpeaking?: boolean;
 }
+
+export type VoiceSignalPayload =
+  | {
+      kind: 'offer';
+      sdp: { type: 'offer'; sdp?: string };
+    }
+  | {
+      kind: 'answer';
+      sdp: { type: 'answer'; sdp?: string };
+    }
+  | {
+      kind: 'ice';
+      candidate: {
+        candidate?: string;
+        sdpMid?: string | null;
+        sdpMLineIndex?: number | null;
+        usernameFragment?: string | null;
+      };
+    };
 
 export interface OnlineRoomSnapshot {
   roomCode: string;
@@ -81,6 +103,19 @@ export type ClientToServerMessage =
       action: GameActionPayload;
     }
   | {
+      type: 'voice:state';
+      clientId: string;
+      joined: boolean;
+      muted: boolean;
+      speaking?: boolean;
+    }
+  | {
+      type: 'voice:signal';
+      clientId: string;
+      targetClientId: string;
+      signal: VoiceSignalPayload;
+    }
+  | {
       type: 'ping';
     };
 
@@ -141,6 +176,16 @@ export type ServerToClientMessage =
   | {
       type: 'game:event';
       event: OnlineGameEvent;
+    }
+  | {
+      type: 'voice:signal';
+      fromClientId: string;
+      signal: VoiceSignalPayload;
+    }
+  | {
+      type: 'voice:speaking';
+      clientId: string;
+      speaking: boolean;
     }
   | {
       type: 'room:error';

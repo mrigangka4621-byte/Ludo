@@ -146,3 +146,72 @@ test('RoomManager supports UNO online turns and CPU takeover when a player leave
   assert.equal(left.deleted, false);
   assert.equal(room.gameState.players[1].isBot, true);
 });
+
+test('RoomManager manages authoritative voice presence, speaking delta updates, room-isolated signaling, and disconnect cleanup', () => {
+  const manager = new RoomManager(() => 0.42);
+  const { room: roomA } = manager.createRoom({
+    clientId: 'voice-host',
+    playerName: 'Host',
+    mode: 'classic',
+    playerCount: 4,
+    tokensPerPlayer: 4,
+    themeId: 'arcade',
+  });
+  manager.joinRoom({ clientId: 'voice-guest', roomCode: roomA.roomCode, playerName: 'Guest' });
+
+  const { room: roomB } = manager.createRoom({
+    clientId: 'outsider',
+    playerName: 'Outsider',
+    mode: 'classic',
+    playerCount: 2,
+    tokensPerPlayer: 4,
+    themeId: 'arcade',
+  });
+  assert.notEqual(roomA.roomCode, roomB.roomCode);
+
+  // Joining voice triggers fullChanged=true so peers initiate WebRTC mesh
+  const joinedVoice = manager.updateVoiceState('voice-host', {
+    joined: true,
+    muted: false,
+    speaking: false,
+  });
+  assert.ok(joinedVoice);
+  assert.equal(joinedVoice.fullChanged, true);
+  assert.equal(roomA.seats[0].voiceJoined, true);
+  assert.equal(roomA.seats[0].voiceMuted, false);
+  assert.equal(roomA.seats[0].voiceSpeaking, false);
+
+  // Speaking toggle only triggers speakingChanged (lightweight delta)
+  const startedSpeaking = manager.updateVoiceState('voice-host', {
+    joined: true,
+    muted: false,
+    speaking: true,
+  });
+  assert.ok(startedSpeaking);
+  assert.equal(startedSpeaking.fullChanged, false);
+  assert.equal(startedSpeaking.speakingChanged, true);
+  assert.equal(roomA.seats[0].voiceSpeaking, true);
+
+  // Muting immediately clears speaking flag
+  const mutedRes = manager.updateVoiceState('voice-host', {
+    joined: true,
+    muted: true,
+    speaking: true,
+  });
+  assert.ok(mutedRes);
+  assert.equal(mutedRes.fullChanged, true);
+  assert.equal(roomA.seats[0].voiceMuted, true);
+  assert.equal(roomA.seats[0].voiceSpeaking, false);
+
+  // Signaling allowed between connected peers in the same room, blocked across different rooms
+  assert.ok(manager.canRelayVoiceSignal('voice-host', 'voice-guest'));
+  assert.equal(manager.canRelayVoiceSignal('voice-host', 'outsider'), null);
+  assert.equal(manager.canRelayVoiceSignal('voice-host', 'voice-host'), null);
+
+  // Disconnecting clears voice state cleanly
+  manager.markDisconnected('voice-host');
+  assert.equal(roomA.seats[0].voiceJoined, false);
+  assert.equal(roomA.seats[0].voiceMuted, false);
+  assert.equal(roomA.seats[0].voiceSpeaking, false);
+  assert.equal(manager.canRelayVoiceSignal('voice-host', 'voice-guest'), null);
+});

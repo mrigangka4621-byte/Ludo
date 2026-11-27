@@ -26,6 +26,7 @@ export const COMEBACK_SIX_PROBABILITY = 0.25;
 export const CRAZY_YARD_MERCY_CHANCES = 4;
 export const CRAZY_MAX_CONSECUTIVE_SIXES = 2;
 export const MAX_FIRE_STREAK_ROLLS = 6;
+export const UNO_BACKWARD_CAPTURE_PENALTY = 6;
 
 export function createInitialDiceDirector(): DiceDirectorState {
   return {
@@ -712,6 +713,7 @@ export function commitMove(state: GameState, move: MoveOption): {
   bonusTurn: boolean;
   playerJustFinished: boolean;
   matchEnded: boolean;
+  unoBackwardPenaltyApplied: boolean;
 } {
   const activeIdx = state.activePlayerIndex;
   const activePlayer = state.players[activeIdx];
@@ -724,6 +726,7 @@ export function commitMove(state: GameState, move: MoveOption): {
   const isUnoMode = state.config.mode === 'uno';
   const isCrazyMode = state.config.mode === 'crazy';
   const nextRevengeCharges: Record<number, boolean> = { ...(state.crazyRevengeCharges ?? {}) };
+  let unoBackwardPenaltyApplied = false;
 
   const updatedPlayers: PlayerState[] = state.players.map((player) => {
     let playerCaptures = player.captures;
@@ -750,6 +753,21 @@ export function commitMove(state: GameState, move: MoveOption): {
           nextRevengeCharges[player.id] = true;
         }
         if (isUnoMode) {
+          // If already pushed behind Start Square by -2/-4 knockbacks, moving forward to Start would reward the victim —
+          // apply an instant -6 squares backwards punishment instead to keep UNO captures fair!
+          if (tok.lapProgress < 0) {
+            unoBackwardPenaltyApplied = true;
+            const { ringLength } = geometry;
+            const penalizedRing =
+              ((tok.ringIndex - UNO_BACKWARD_CAPTURE_PENALTY) % ringLength + ringLength) % ringLength;
+            return {
+              ...tok,
+              zone: 'track' as const,
+              ringIndex: penalizedRing,
+              lapProgress: tok.lapProgress - UNO_BACKWARD_CAPTURE_PENALTY,
+              homeIndex: -1,
+            };
+          }
           return {
             ...tok,
             zone: 'track' as const,
@@ -819,8 +837,7 @@ export function commitMove(state: GameState, move: MoveOption): {
   const didFinishToken = move.kind === 'finish';
   const hitCrazyDoubleSixCap =
     isCrazyMode && rolledSix && state.consecutiveSixes >= CRAZY_MAX_CONSECUTIVE_SIXES;
-  const grantSixBonus = rolledSix && !hitCrazyDoubleSixCap;
-  const bonusTurn = !playerJustFinished && !matchEnded && (grantSixBonus || didCapture || didFinishToken);
+  const bonusTurn = !playerJustFinished && !matchEnded && (rolledSix || didCapture || didFinishToken);
 
   const nextPlayerIndex = bonusTurn
     ? activeIdx
@@ -835,14 +852,16 @@ export function commitMove(state: GameState, move: MoveOption): {
     kind = 'finish';
   } else if (didCapture) {
     const dirNote = isBackwardMove ? ' with a backward ambush' : '';
-    message = `${movedPlayer.name} captured ${capturedNames.join(' & ')}${dirNote}! Bonus roll.`;
+    const capNote = hitCrazyDoubleSixCap ? ' (1–5 only)' : '';
+    message = `${movedPlayer.name} captured ${capturedNames.join(' & ')}${dirNote}! Bonus roll${capNote}.`;
     kind = 'capture';
   } else if (didFinishToken) {
-    message = `${movedPlayer.name} brought a token home! Bonus roll.`;
+    const capNote = hitCrazyDoubleSixCap ? ' (1–5 only)' : '';
+    message = `${movedPlayer.name} brought a token home! Bonus roll${capNote}.`;
     kind = 'finish';
   } else if (hitCrazyDoubleSixCap) {
-    message = `⚡ Double Six limit (2×6) reached for ${movedPlayer.name}! ${updatedPlayers[nextPlayerIndex].name}'s turn.`;
-    kind = 'info';
+    message = `⚡ Double Six (2×6) for ${movedPlayer.name}! Bonus roll (1–5 only — no 3rd six)!`;
+    kind = 'bonus';
   } else if (move.kind === 'deploy') {
     message = `${movedPlayer.name} deployed a token! Bonus roll for 6.`;
     kind = 'bonus';
@@ -900,6 +919,7 @@ export function commitMove(state: GameState, move: MoveOption): {
     bonusTurn,
     playerJustFinished,
     matchEnded,
+    unoBackwardPenaltyApplied,
   };
 }
 
@@ -998,16 +1018,26 @@ function isPlayerThreatenedOnTrack(
 }
 
 function pickWeightedFace(weights: number[], rng: () => number): number {
-  const total = weights.reduce((acc, w) => acc + Math.max(0, w), 0);
+  let total = 0;
+  let lastPositiveFace = 1;
+  for (let i = 0; i < weights.length; i++) {
+    const w = Math.max(0, weights[i]);
+    if (w > 0) {
+      total += w;
+      lastPositiveFace = i + 1;
+    }
+  }
   if (total <= 0) {
     return Math.min(6, Math.max(1, Math.floor(rng() * 6) + 1));
   }
   let threshold = rng() * total;
   for (let i = 0; i < weights.length; i++) {
-    threshold -= Math.max(0, weights[i]);
+    const w = Math.max(0, weights[i]);
+    if (w <= 0) continue;
+    threshold -= w;
     if (threshold <= 0) return i + 1;
   }
-  return 6;
+  return lastPositiveFace;
 }
 
 /**
@@ -1434,6 +1464,11 @@ export function resolveCrazyStarChaos(
         { ...stateAfterCommit, activePlayerIndex: moverIdx, diceValue: 2 },
         boost
       );
+      const hadBonusRoll = stateAfterCommit.activePlayerIndex === moverIdx;
+      const keepMoverTurn =
+        hadBonusRoll &&
+        !committed.matchEnded &&
+        committed.nextState.players[moverIdx]?.finishedRank === null;
       const msg =
         boost.capturesTokenIds.length > 0
           ? `⚡ CHAOS STAR TURBO +2! ${mover.name} rocketed ahead and CHAIN-CAPTURED ${committed.capturedNames.join(' & ')}!`
@@ -1444,6 +1479,10 @@ export function resolveCrazyStarChaos(
         message: msg,
         nextState: {
           ...committed.nextState,
+          activePlayerIndex: keepMoverTurn ? moverIdx : committed.nextState.activePlayerIndex,
+          consecutiveSixes: keepMoverTurn
+            ? stateAfterCommit.consecutiveSixes
+            : committed.nextState.consecutiveSixes,
           lastEvent: {
             id: eventId,
             message: msg,

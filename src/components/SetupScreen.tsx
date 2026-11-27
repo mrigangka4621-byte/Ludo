@@ -282,7 +282,7 @@ export function SetupScreen({
               {config.mode === 'flip'
                 ? 'Choose Forward or Backward each turn to ambush rivals or complete a reverse lap. Opening Mercy 6 after 10 misses; Comeback Mercy 6 in max 8 rolls (+50% 6 chance) if captured back to Home Yard!'
                 : config.mode === 'crazy'
-                  ? 'Pure chaos! Boosted 6s (capped at Double Six / 2×6 per turn), guaranteed capture snipe whenever a rival is 1–6 steps ahead, Revenge 6s after getting kicked, and wild Chaos Star events (+2 Turbo, Swaparoo, Bonus Roll)!'
+                  ? 'Pure chaos! Boosted 6s (capped at Double Six — after two 6s your bonus roll is guaranteed 1–5!), guaranteed capture snipe whenever a rival is 1–6 steps ahead, Revenge 6s after getting kicked, and wild Chaos Star events (+2 Turbo, Swaparoo, Bonus Roll)!'
                   : config.mode === 'uno'
                     ? 'No dice — play from 6 UNO cards in your Home Yard! All pawns start ready on Start Squares. Capture rivals back to Start for bonus plays, or drop Reverse, Skip, Swap, and stackable -2 / -4 knockbacks!'
                     : 'Traditional clockwise race with safe stars, bonus rolls on 6s, opponent captures, 10-roll opening Mercy 6, and 8-roll (+50% boosted) Comeback Mercy 6 if captured back to Home Yard!'}

@@ -4,6 +4,7 @@ import type {
   OnlineGameEvent,
   OnlineRoomSnapshot,
   ServerToClientMessage,
+  VoiceSignalPayload,
 } from './protocol';
 import type { GameMode, GameState, ThemeId } from '../game/types';
 
@@ -19,6 +20,8 @@ export interface OnlineClientHandlers {
   onRoomUpdate?: (room: OnlineRoomSnapshot) => void;
   onRoomStarted?: (payload: { room: OnlineRoomSnapshot; gameState: GameState }) => void;
   onGameEvent?: (event: OnlineGameEvent) => void;
+  onVoiceSignal?: (payload: { fromClientId: string; signal: VoiceSignalPayload }) => void;
+  onVoiceSpeaking?: (payload: { clientId: string; speaking: boolean }) => void;
   onError?: (err: { code: string; message: string }) => void;
 }
 
@@ -136,6 +139,16 @@ export class MangoOnlineClient {
         });
       } else if (msg.type === 'game:event') {
         this.handlers.onGameEvent?.(msg.event);
+      } else if (msg.type === 'voice:signal') {
+        this.handlers.onVoiceSignal?.({
+          fromClientId: msg.fromClientId,
+          signal: msg.signal,
+        });
+      } else if (msg.type === 'voice:speaking') {
+        this.handlers.onVoiceSpeaking?.({
+          clientId: msg.clientId,
+          speaking: msg.speaking,
+        });
       } else if (msg.type === 'room:error') {
         this.handlers.onError?.({ code: msg.code, message: msg.message });
       }
@@ -257,5 +270,30 @@ export class MangoOnlineClient {
       clientId: this.clientId,
       action,
     });
+  }
+
+  sendVoiceState(joined: boolean, muted: boolean, speaking = false) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
+      JSON.stringify({
+        type: 'voice:state',
+        clientId: this.clientId,
+        joined,
+        muted,
+        speaking,
+      } satisfies ClientToServerMessage)
+    );
+  }
+
+  sendVoiceSignal(targetClientId: string, signal: VoiceSignalPayload) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
+      JSON.stringify({
+        type: 'voice:signal',
+        clientId: this.clientId,
+        targetClientId,
+        signal,
+      } satisfies ClientToServerMessage)
+    );
   }
 }

@@ -15,10 +15,12 @@ import { soundFx } from '../game/sound';
 import { BOARD_THEMES, PLAYER_PALETTES } from '../game/themes';
 import type { GameMode, ThemeId } from '../game/types';
 import type { OnlineRoomSnapshot } from '../multiplayer/protocol';
+import type { VoiceUiSnapshot } from '../multiplayer/voiceChat';
 import type { ConnectionStatus } from '../multiplayer/wsClient';
 import { TeardropPinBadge } from './GameHud';
 import { LudoBoard } from './LudoBoard';
 import { TitleEmblem } from './TitleEmblem';
+import { SeatVoiceBadge, VoiceChatBar } from './VoiceIndicators';
 
 interface OnlineLobbyScreenProps {
   room: OnlineRoomSnapshot;
@@ -27,6 +29,11 @@ interface OnlineLobbyScreenProps {
   themeId: ThemeId;
   connectionStatus: ConnectionStatus;
   error: string | null;
+  voice: VoiceUiSnapshot;
+  onJoinVoice: () => void;
+  onLeaveVoice: () => void;
+  onToggleVoiceMute: () => void;
+  onToggleVoiceDeafen: () => void;
   onUpdateSettings: (patch: {
     mode?: GameMode;
     playerCount?: number;
@@ -53,6 +60,11 @@ export function OnlineLobbyScreen({
   themeId,
   connectionStatus,
   error,
+  voice,
+  onJoinVoice,
+  onLeaveVoice,
+  onToggleVoiceMute,
+  onToggleVoiceDeafen,
   onUpdateSettings,
   onStartMatch,
   onLeaveRoom,
@@ -250,6 +262,17 @@ export function OnlineLobbyScreen({
             </div>
           )}
 
+          {/* Room Voice Chat Controls */}
+          <VoiceChatBar
+            theme={theme}
+            voice={voice}
+            seats={room.seats}
+            onJoinVoice={onJoinVoice}
+            onLeaveVoice={onLeaveVoice}
+            onToggleMute={onToggleVoiceMute}
+            onToggleDeafen={onToggleVoiceDeafen}
+          />
+
           {/* Connected Players Roster */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs font-bold">
@@ -268,15 +291,32 @@ export function OnlineLobbyScreen({
                 const defaults = createDefaultPlayers(room.playerCount);
                 const palette = PLAYER_PALETTES[seat?.paletteIndex ?? defaults[idx].paletteIndex];
                 const isMe = seat && seat.seatIndex === mySeatIndex;
+                const isSpeaking = Boolean(
+                  seat && seat.connected && seat.voiceJoined && !seat.voiceMuted && seat.voiceSpeaking
+                );
 
                 return (
                   <li
                     key={idx}
-                    className="flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl"
+                    data-testid={`lobby-seat-${idx}`}
+                    data-voice-speaking={isSpeaking ? 'true' : 'false'}
+                    className={`flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl transition-all ${
+                      isSpeaking ? 'animate-voice-speak-glow' : ''
+                    }`}
                     style={{
-                      backgroundColor: isMe ? 'rgba(250, 204, 21, 0.14)' : 'rgba(0,0,0,0.16)',
+                      backgroundColor: isSpeaking
+                        ? 'rgba(34, 197, 94, 0.16)'
+                        : isMe
+                          ? 'rgba(250, 204, 21, 0.14)'
+                          : 'rgba(0,0,0,0.16)',
                       border: `1.5px solid ${
-                        isMe ? '#FACC15' : seat ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.06)'
+                        isSpeaking
+                          ? '#4ADE80'
+                          : isMe
+                            ? '#FACC15'
+                            : seat
+                              ? 'rgba(255,255,255,0.14)'
+                              : 'rgba(255,255,255,0.06)'
                       }`,
                     }}
                   >
@@ -300,11 +340,17 @@ export function OnlineLobbyScreen({
                             </span>
                           )}
                         </div>
-                        <div className="text-[11px]" style={{ color: theme.textMuted }}>
+                        <div className="text-[11px]" style={{ color: isSpeaking ? '#86EFAC' : theme.textMuted }}>
                           {seat
-                            ? seat.connected
-                              ? 'Connected'
-                              : 'Reconnecting...'
+                            ? isSpeaking
+                              ? 'Speaking...'
+                              : seat.connected
+                                ? seat.voiceJoined
+                                  ? seat.voiceMuted
+                                    ? 'Connected · Mic muted'
+                                    : 'Connected · In voice'
+                                  : 'Connected'
+                                : 'Reconnecting...'
                             : room.fillWithBots
                               ? 'Smart CPU will play this seat'
                               : 'Waiting for friend with code'}
@@ -312,8 +358,15 @@ export function OnlineLobbyScreen({
                       </div>
                     </div>
 
-                    {!seat && room.fillWithBots && (
-                      <Bot size={15} className="shrink-0 opacity-75" />
+                    {seat ? (
+                      <SeatVoiceBadge
+                        voiceJoined={seat.voiceJoined}
+                        voiceMuted={seat.voiceMuted}
+                        voiceSpeaking={seat.voiceSpeaking}
+                        testIdPrefix={`lobby-voice-seat-${idx}`}
+                      />
+                    ) : (
+                      room.fillWithBots && <Bot size={15} className="shrink-0 opacity-75" />
                     )}
                   </li>
                 );

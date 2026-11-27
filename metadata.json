@@ -1,6 +1,6 @@
 {
   "name": "DecaLudo",
   "description": "Offline pass-and-play Ludo for 2 to 10 players with customizable tabletop themes, smooth animations, and Flip-Track forward or backward gameplay.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
